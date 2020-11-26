@@ -1,7 +1,6 @@
-resolver: lts-13.19
+resolver: nightly-2020-11-23
 packages:
 - .
-extra-deps:
-- natural-transformation-0.4
+extra-deps: []
 flags: {}
 extra-package-dbs: []
