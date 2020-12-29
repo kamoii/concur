@@ -30,7 +30,7 @@ main :: IO ()
 main =
     defaultMain $
         testGroup
-            "All"
+            "Widget"
             [ testDisplay
             , testIO
             , testAlternative
