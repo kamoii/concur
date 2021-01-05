@@ -105,9 +105,7 @@ remoteWidget ::
     ( MultiAlternative m
     , MonadUnsafeBlockingIO m
     , MonadSafeBlockingIO m
-    , MonadIO m
     , Monad m
-    , Show a
     ) =>
     m b ->
     (a -> m b) ->
