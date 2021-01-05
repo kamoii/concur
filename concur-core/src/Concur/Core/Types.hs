@@ -75,14 +75,14 @@ _mapView f (Widget w) = Widget $ go w
 
 -- Generic widget view wrapper
 -- DEPRECATE: Use mapView (pure . f) directly
--- This function isn't worth adding operation to this module.
+-- This function isn't worth adding operation to this module. Also it can't used with MonadView.
 wrapView :: Applicative f => (u -> v) -> Widget u a -> Widget (f v) a
 wrapView f = _mapView (pure . f)
 
 {- | IMPORTANT: Blocking IO is dangerous as it can block the entire UI from updating.
    It should only be used for *very* quick running IO actions like creating MVars.
 -}
-unsafeBlockingIO :: Monoid v => IO a -> Widget v a
+unsafeBlockingIO :: IO a -> Widget v a
 unsafeBlockingIO = io
 
 -- This is a safe use for blockingIO, and is exported
