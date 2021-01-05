@@ -233,7 +233,7 @@ instance MonadView v m => MonadView v (ReaderT r m) where
     display = lift . display
     mapView f = mapReaderT (mapView f)
 
-instance MonadView v m => MonadView v (ExceptT v m) where
+instance MonadView v m => MonadView v (ExceptT e m) where
     view = lift . view
     display = lift . display
     mapView f = mapExceptT (mapView f)
