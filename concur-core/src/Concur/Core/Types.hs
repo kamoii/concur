@@ -16,7 +16,6 @@ module Concur.Core.Types (
     SuspendF (..),
     awaitViewAction,
     MultiAlternative (..),
-    loadWithIO,
     remoteWidget,
     unsafeBlockingIO,
     MonadUnsafeBlockingIO (..),
@@ -75,6 +74,8 @@ _mapView f (Widget w) = Widget $ go w
     g Forever = Forever
 
 -- Generic widget view wrapper
+-- DEPRECATE: Use mapView (pure . f) directly
+-- This function isn't worth adding operation to this module.
 wrapView :: Applicative f => (u -> v) -> Widget u a -> Widget (f v) a
 wrapView f = _mapView (pure . f)
 
@@ -90,15 +91,6 @@ awaitViewAction f = do
     n <- io N.newNotify
     _view (f n)
     effect $ N.await n
-
--- TODO: what to do when the parent dies?
-loadWithIO :: IO a -> Widget v a
-loadWithIO a = do
-    n <- io $ do
-        n <- newEmptyMVar
-        _ <- forkIO $ a >>= putMVar n
-        pure n
-    effect $ takeMVar n
 
 -- Make a Widget, which can be pushed to remotely
 remoteWidget ::
@@ -118,7 +110,7 @@ remoteWidget d f = do
     wid var ui = orr [Left <$> ui, Right <$> liftSafeBlockingIO (takeMVar var)] >>= either return (wid var . f)
 
 instance MonadIO (Widget v) where
-    liftIO = loadWithIO
+    liftIO = effect
 
 -- IMPORTANT NOTE: This Alternative instance is NOT the same one as that for Free.
 -- That one simply uses Alternative for Suspend. But that one isn't sufficient for us.
