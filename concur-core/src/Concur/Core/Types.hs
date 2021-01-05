@@ -117,7 +117,7 @@ remoteWidget d f = do
     proxy var = liftUnsafeBlockingIO . putMVar var
     wid var ui = orr [Left <$> ui, Right <$> liftSafeBlockingIO (takeMVar var)] >>= either return (wid var . f)
 
-instance Monoid v => MonadIO (Widget v) where
+instance MonadIO (Widget v) where
     liftIO = loadWithIO
 
 -- IMPORTANT NOTE: This Alternative instance is NOT the same one as that for Free.
