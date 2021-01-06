@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 82e1fa3519b6c35db5758c01000a22f1052d5c3b021fff853926f9c09b4d94c6
+-- hash: 313a597fe96bdebff59b2adb73c67f2c7e1ce28a3278f37f30364f4a056e3dbc
 
 name:           concur-core
 version:        0.1.0.0
@@ -40,6 +40,7 @@ library
   ghc-options: -Wall -ferror-spans
   build-depends:
       base >=4.7 && <5
+    , exceptions >=0.10
     , free >=4.12
     , mtl >=2.2
     , natural-transformation >=0.4
@@ -57,10 +58,12 @@ test-suite haskell-matrix-test
   build-depends:
       base >=4.7 && <5
     , concur-core
+    , exceptions >=0.10
     , free >=4.12
     , mtl >=2.2
     , natural-transformation >=0.4
     , tasty
     , tasty-hunit
     , transformers >=0.5
+    , unliftio
   default-language: Haskell2010

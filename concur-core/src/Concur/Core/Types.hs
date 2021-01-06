@@ -7,6 +7,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 module Concur.Core.Types (
@@ -24,7 +25,7 @@ module Concur.Core.Types (
 ) where
 
 import Control.Applicative (Alternative, empty, (<|>))
-import Control.Concurrent (MVar, ThreadId, forkIO, killThread, newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent (MVar, ThreadId, forkIO, killThread, newEmptyMVar, putMVar, readMVar, takeMVar)
 import Control.Monad (MonadPlus (..), forM)
 import Control.Monad.Except (ExceptT, mapExceptT)
 import Control.Monad.Free (Free (..), hoistFree, liftF)
@@ -33,6 +34,8 @@ import Control.Monad.Reader (MonadTrans (lift), ReaderT, mapReaderT)
 import Control.MultiAlternative (MultiAlternative, never, orr)
 
 import qualified Concur.Core.Notify as N
+import Control.Exception (Exception, throwIO, try)
+import Control.Monad.Catch (MonadCatch (..), MonadThrow (..))
 
 data SuspendF v next
     = StepView v next
@@ -79,6 +82,25 @@ _mapView f (Widget w) = Widget $ go w
 wrapView :: Applicative f => (u -> v) -> Widget u a -> Widget (f v) a
 wrapView f = _mapView (pure . f)
 
+_throwM :: Exception e => e -> Widget v a
+_throwM = io . throwIO
+
+{- | Catch exception (Experimental implementation)
+ Catches syncrounous exception caused by `io' or `effect'.
+ scoped operation なので当然 interpreter が必要になる。
+ 同期例外は補足可能。
+ 非同期例外は補足できる場合とそうでない場合が多分ある。
+-}
+_catch :: forall a e v. Exception e => Widget v a -> (e -> Widget v a) -> Widget v a
+_catch (Widget w) handler = step w
+  where
+    step :: Free (SuspendF v) a -> Widget v a
+    step (Free (StepView v next)) = _view v *> step next
+    step (Free (StepIO a next)) = io (try @e a) >>= either handler (step . next)
+    step (Free (StepBlock a next)) = effect (try @e a) >>= either handler (step . next)
+    step (Free Forever) = forever
+    step (Pure a) = pure a
+
 {- | IMPORTANT: Blocking IO is dangerous as it can block the entire UI from updating.
    It should only be used for *very* quick running IO actions like creating MVars.
 -}
@@ -111,6 +133,12 @@ remoteWidget d f = do
 
 instance MonadIO (Widget v) where
     liftIO = effect
+
+instance MonadThrow (Widget v) where
+    throwM = _throwM
+
+instance MonadCatch (Widget v) where
+    catch = _catch
 
 -- IMPORTANT NOTE: This Alternative instance is NOT the same one as that for Free.
 -- That one simply uses Alternative for Suspend. But that one isn't sufficient for us.
@@ -201,8 +229,8 @@ instance MonadUnsafeBlockingIO (Widget v) where
 instance MonadUnsafeBlockingIO m => MonadUnsafeBlockingIO (ReaderT r m) where
     liftUnsafeBlockingIO = lift . liftUnsafeBlockingIO
 
-instance MonadUnsafeBlockingIO m => MonadUnsafeBlockingIO (ExceptT e m) where
-    liftUnsafeBlockingIO = lift . liftUnsafeBlockingIO
+-- instance MonadUnsafeBlockingIO m => MonadUnsafeBlockingIO (ExceptT e m) where
+--     liftUnsafeBlockingIO = lift . liftUnsafeBlockingIO
 
 -- | MonadSafeBlockingIO
 class Monad m => MonadSafeBlockingIO m where
@@ -214,8 +242,8 @@ instance MonadSafeBlockingIO (Widget v) where
 instance MonadSafeBlockingIO m => MonadSafeBlockingIO (ReaderT r m) where
     liftSafeBlockingIO = lift . liftSafeBlockingIO
 
-instance MonadSafeBlockingIO m => MonadSafeBlockingIO (ExceptT e m) where
-    liftSafeBlockingIO = lift . liftSafeBlockingIO
+-- instance MonadSafeBlockingIO m => MonadSafeBlockingIO (ExceptT e m) where
+--     liftSafeBlockingIO = lift . liftSafeBlockingIO
 
 -- | MonadView
 class Monad m => MonadView v m | m -> v where
@@ -233,7 +261,7 @@ instance MonadView v m => MonadView v (ReaderT r m) where
     display = lift . display
     mapView f = mapReaderT (mapView f)
 
-instance MonadView v m => MonadView v (ExceptT e m) where
-    view = lift . view
-    display = lift . display
-    mapView f = mapExceptT (mapView f)
+-- instance MonadView v m => MonadView v (ExceptT e m) where
+--     view = lift . view
+--     display = lift . display
+--     mapView f = mapExceptT (mapView f)
