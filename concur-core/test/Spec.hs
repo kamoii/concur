@@ -3,7 +3,7 @@
 import Concur.Core
 import Control.Applicative (Alternative ((<|>)))
 import Control.Concurrent (threadDelay)
-import Control.Exception (throwIO, Exception, try)
+import Control.Exception (Exception, throwIO, try)
 import Control.Monad.Catch (MonadCatch (catch), MonadThrow (throwM))
 import Control.Monad.Free (Free (Free, Pure))
 import Data.Functor (($>))
@@ -72,13 +72,29 @@ testAlternative =
             ref <- IORef.newIORef (1 :: Int)
             _ps <-
                 runWidget $
-                    waitFor1
-                        <|> ( waitFor2
-                                *> liftSafeBlockingIO (IORef.writeIORef ref 2)
-                            )
+                    orr
+                        [ waitFor1
+                        , liftSafeBlockingIO $ threadDelay t2 *> IORef.writeIORef ref 2
+                        ]
             val0 <- IORef.readIORef ref
             val0 @?= 1
-            threadDelay 20000
+            threadDelay t2
+            val1 <- IORef.readIORef ref
+            val1 @?= 1
+        , testCase "cancelling'" $ do
+            ref <- IORef.newIORef (1 :: Int)
+            _ps <-
+                runWidget $
+                    orr
+                        [ waitFor1
+                        , orr
+                            [ liftSafeBlockingIO $ threadDelay t2 *> IORef.writeIORef ref 2
+                            , waitForever
+                            ]
+                        ]
+            val0 <- IORef.readIORef ref
+            val0 @?= 1
+            threadDelay t2
             val1 <- IORef.readIORef ref
             val1 @?= 1
         ]
@@ -86,9 +102,13 @@ testAlternative =
 -- 10000 microsecond is 0.01s.
 -- これ以上に短かくすると差が小さすぎて,スレッド生成等の時間で埋まってしまい
 -- 時偶あるべき順序とは逆の順序になってしまう。
-waitFor1 = waitFor 10000
-waitFor2 = waitFor 20000
+t1 = 10000
+t2 = 20000
+waitFor1 = waitFor t1
+waitFor2 = waitFor t2
 waitFor n = liftSafeBlockingIO (threadDelay n)
+waitForever :: MonadSafeBlockingIO f => f a
+waitForever = waitFor maxBound *> waitForever
 
 testIO :: TestTree
 testIO = testCase "io" $ do
