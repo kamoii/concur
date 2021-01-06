@@ -3,6 +3,8 @@
 import Concur.Core
 import Control.Applicative (Alternative ((<|>)))
 import Control.Concurrent (threadDelay)
+import Control.Exception (throwIO, Exception, try)
+import Control.Monad.Catch (MonadCatch (catch), MonadThrow (throwM))
 import Control.Monad.Free (Free (Free, Pure))
 import Data.Functor (($>))
 import qualified Data.IORef as IORef
@@ -34,6 +36,7 @@ main =
             [ testDisplay
             , testIO
             , testAlternative
+            , testException
             ]
 
 testAlternative :: TestTree
@@ -79,13 +82,13 @@ testAlternative =
             val1 <- IORef.readIORef ref
             val1 @?= 1
         ]
-  where
-    -- 10000 microsecond is 0.01s.
-    -- これ以上に短かくすると差が小さすぎて,スレッド生成等の時間で埋まってしまい
-    -- 時偶あるべき順序とは逆の順序になってしまう。
-    waitFor1 = waitFor 10000
-    waitFor2 = waitFor 20000
-    waitFor n = liftSafeBlockingIO (threadDelay n)
+
+-- 10000 microsecond is 0.01s.
+-- これ以上に短かくすると差が小さすぎて,スレッド生成等の時間で埋まってしまい
+-- 時偶あるべき順序とは逆の順序になってしまう。
+waitFor1 = waitFor 10000
+waitFor2 = waitFor 20000
+waitFor n = liftSafeBlockingIO (threadDelay n)
 
 testIO :: TestTree
 testIO = testCase "io" $ do
@@ -98,3 +101,82 @@ testDisplay :: TestTree
 testDisplay = testCase "display" $ do
     ops <- runWidget (display "foo" :: Widget String Void)
     ops @?= [WOView "foo", WOForever]
+
+data TestException = TestException
+    deriving (Show, Eq)
+instance Exception TestException
+
+data TestException2 = TestException2
+    deriving (Show, Eq)
+instance Exception TestException2
+
+testException :: TestTree
+testException =
+    testGroup
+        "Exception"
+        [ testNoThrow
+        , testCatch
+        , testCatchMiss
+        , testCatchAlternative
+        , testCatchAlternative'
+        , testCatchEffect
+        -- TODO: Currently freezes
+        -- , testCatchEffect'
+        ]
+  where
+    testNoThrow = testCase "no throw" $ do
+        ops <-
+            runWidget $
+                catch @_ @TestException
+                    (pure (1 :: Int))
+                    (\_ -> pure 2)
+        ops @?= [WODone 1]
+
+    testCatch = testCase "catch" $ do
+        ops <-
+            runWidget $
+                catch @_ @TestException
+                    (throwM TestException $> (1 :: Int))
+                    (\_ -> pure 2)
+        ops @?= [WODone 2]
+
+    testCatchMiss = testCase "catch miss" $ do
+        ops <-
+            try $
+                runWidget $
+                    catch @_ @TestException2
+                        (throwM TestException $> (1 :: Int))
+                        (\_ -> pure 2)
+        ops @?= Left TestException
+
+    testCatchAlternative = testCase "catch (<|>)" $ do
+        ops <-
+            runWidget $ do
+                let w0 = display "a" <|> waitFor2 $> 2
+                let w1 = waitFor1 *> throwM TestException $> (1 :: Int)
+                catch @_ @TestException (w0 <|> w1) (\_ -> pure 2)
+        ops @?= [WOView "a", WODone 2]
+
+    testCatchAlternative' = testCase "catch (<|>)'" $ do
+        ops <-
+            runWidget $ do
+                let w0 = waitFor1 *> throwM TestException $> (1 :: Int)
+                let w1 = waitFor2 *> throwM TestException2 $> (2 :: Int)
+                catch @_ @TestException (w0 <|> w1) (\_ -> pure 3)
+        ops @?= [WOView "", WODone 3]
+
+    testCatchEffect = testCase "catch from effect" $ do
+        ops <-
+            runWidget $
+                catch @_ @TestException
+                    (liftSafeBlockingIO (throwIO TestException) $> (1 :: Int))
+                    (\_ -> pure 2)
+        ops @?= [WODone 2]
+
+    testCatchEffect' = testCase "catch from effect'" $ do
+        ops <-
+            runWidget $ do
+                let w0 = waitFor1 *> liftSafeBlockingIO (throwIO TestException) $> (1 :: Int)
+                let w1 = waitFor2 *> liftSafeBlockingIO (throwIO TestException2) $> (2 :: Int)
+                catch @_ @TestException (w0 <|> w1) (\_ -> pure 3)
+        ops @?= [WOView "", WODone 3]
