@@ -62,6 +62,20 @@ testAlternative =
         , testCase "concat" $ do
             ops <- runWidget $ display "a" <|> display "b" <|> waitFor 10
             ops @?= [WOView "ab", WODone ()]
+        , testCase "nested" $ do
+            ops <-
+                runWidget $
+                    orr
+                        [ display "a"
+                        , orr
+                            [waitFor t1 *> display "b"]
+                        , orr
+                            [ waitFor t2 *> display "c"
+                            , waitForever
+                            ]
+                        , waitFor (t1 + t2 + t1)
+                        ]
+            ops @?= [WOView "a", WOView "ab", WOView "abc", WODone ()]
         , testCase "race" $ do
             ops <- runWidget $ (waitFor1 $> (1 :: Int)) <|> (waitFor2 $> 2)
             ops @?= [WOView "", WODone 1]
