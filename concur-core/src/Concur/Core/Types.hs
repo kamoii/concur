@@ -164,8 +164,11 @@ stepW _ (Pure a) = pure $ Left a
 instance Monoid v => MultiAlternative (Widget v) where
     never = _display mempty
 
-    orr [w] = w
+    -- Addhing this pattarn-match doesn't change semantics.
+    -- Instead of foerver-blocking StepBlock, we get Forever, which can be used to optimize.
+    orr [] = _display mempty
 
+    orr [w] = w
     -- Following commented out code is the previous implementation for case [w].
     -- I don't think we need to interpret given Widget.
     -- Just past it bellow should be enough and also most efficient.

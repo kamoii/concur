@@ -42,7 +42,7 @@ main =
 testAlternative :: TestTree
 testAlternative =
     testGroup
-        "Alternative"
+        "orr/Alternative"
         [ testCase "immediate" $ do
             -- left-biased
             ops <- runWidget $ pure "a" <|> pure "b"
@@ -59,6 +59,9 @@ testAlternative =
         , testCase "zero-time'" $ do
             ops <- runWidget $ waitFor 0 <|> display "a"
             ops @?= [WOView "a", WODone ()]
+        , testCase "empty" $ do
+            ops <- runWidget @() $ orr []
+            ops @?= [WOView "", WOForever]
         , testCase "concat" $ do
             ops <- runWidget $ display "a" <|> display "b" <|> waitFor 10
             ops @?= [WOView "ab", WODone ()]
