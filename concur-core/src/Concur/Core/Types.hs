@@ -35,6 +35,11 @@ import Control.MultiAlternative (MultiAlternative, never, orr)
 
 import qualified Concur.Core.Notify as N
 
+-- | Functor for Widegt Free Monad
+--
+-- `Forever' constructor should be semantically same as `StepBlock (forever (threadDelay maxBound))'.
+-- It gives us more information than opaque StepBlock constructor, making some optimization possible.
+-- It makes interpreters possible to terminate.
 data SuspendF v next
     = StepView v next
     | StepBlock (IO next)
