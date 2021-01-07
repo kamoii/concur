@@ -244,6 +244,9 @@ instance MonadSafeBlockingIO m => MonadSafeBlockingIO (ReaderT r m) where
 --     liftSafeBlockingIO = lift . liftSafeBlockingIO
 
 -- | MonadView
+
+-- TODO: Maybe `view' shouldn't be exposed to user. Only `display'
+-- `view' might encorouage imprative style of coding.
 class Monad m => MonadView v m | m -> v where
     view :: v -> m ()
     display :: v -> m a
