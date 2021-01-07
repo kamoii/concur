@@ -23,8 +23,8 @@ runWidget (Widget w) = go w
   where
     go :: Free (SuspendF v) a -> IO [WidgetOp v a]
     go (Free (StepView v next)) = (WOView v :) <$> go next
-    go (Free (StepIO io next)) = (next <$> io) >>= go
-    go (Free (StepBlock io next)) = (next <$> io) >>= go
+    go (Free (StepIO io)) = io >>= go
+    go (Free (StepBlock io)) = io >>= go
     go (Free Forever) = pure [WOForever]
     go (Pure a) = pure [WODone a]
 

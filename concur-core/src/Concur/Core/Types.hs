@@ -25,37 +25,36 @@ module Concur.Core.Types (
 ) where
 
 import Control.Applicative (Alternative, empty, (<|>))
-import Control.Concurrent (MVar, ThreadId, forkIO, killThread, newEmptyMVar, putMVar, readMVar, takeMVar)
+import Control.Concurrent (MVar, ThreadId, forkIO, killThread, newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (Exception, throwIO, try)
 import Control.Monad (MonadPlus (..), forM)
-import Control.Monad.Except (ExceptT, mapExceptT)
+import Control.Monad.Catch (MonadCatch (..), MonadThrow (..))
 import Control.Monad.Free (Free (..), hoistFree, liftF)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadTrans (lift), ReaderT, mapReaderT)
 import Control.MultiAlternative (MultiAlternative, never, orr)
 
 import qualified Concur.Core.Notify as N
-import Control.Exception (Exception, throwIO, try)
-import Control.Monad.Catch (MonadCatch (..), MonadThrow (..))
 
 data SuspendF v next
     = StepView v next
-    | forall r. StepBlock (IO r) (r -> next)
-    | forall r. StepIO (IO r) (r -> next)
+    | StepBlock (IO next)
+    | StepIO (IO next)
     | Forever
 
 deriving instance Functor (SuspendF v)
 
-newtype Widget v a = Widget {step :: Free (SuspendF v) a}
+newtype Widget v a = Widget {unWidget :: Free (SuspendF v) a}
     deriving (Functor, Applicative, Monad)
 
 _view :: v -> Widget v ()
 _view v = Widget $ liftF $ StepView v ()
 
 effect :: IO a -> Widget v a
-effect a = Widget $ liftF $ StepBlock a id
+effect a = Widget $ liftF $ StepBlock a
 
 io :: IO a -> Widget v a
-io a = Widget $ liftF $ StepIO a id
+io a = Widget $ liftF $ StepIO a
 
 forever :: Widget v a
 forever = Widget $ liftF Forever
@@ -72,8 +71,8 @@ _mapView f (Widget w) = Widget $ go w
   where
     go = hoistFree g
     g (StepView v next) = StepView (f v) next
-    g (StepIO a next) = StepIO a next
-    g (StepBlock a next) = StepBlock a next
+    g (StepIO a) = StepIO a
+    g (StepBlock a) = StepBlock a
     g Forever = Forever
 
 -- Generic widget view wrapper
@@ -96,8 +95,8 @@ _catch (Widget w) handler = step w
   where
     step :: Free (SuspendF v) a -> Widget v a
     step (Free (StepView v next)) = _view v *> step next
-    step (Free (StepIO a next)) = io (try @e a) >>= either handler (step . next)
-    step (Free (StepBlock a next)) = effect (try @e a) >>= either handler (step . next)
+    step (Free (StepIO a)) = io (try @e a) >>= either handler step
+    step (Free (StepBlock a)) = effect (try @e a) >>= either handler step
     step (Free Forever) = forever
     step (Pure a) = pure a
 
@@ -153,8 +152,8 @@ instance Monoid v => Alternative (Widget v) where
 
 stepW :: v -> Free (SuspendF v) a -> IO (Either a (v, Maybe (IO (Free (SuspendF v) a))))
 stepW _ (Free (StepView v next)) = stepW v next
-stepW v (Free (StepIO a next)) = a >>= stepW v . next
-stepW v (Free (StepBlock a next)) = pure $ Right (v, Just (a >>= pure . next))
+stepW v (Free (StepIO a)) = a >>= stepW v
+stepW v (Free (StepBlock a)) = pure $ Right (v, Just a)
 stepW v (Free Forever) = pure $ Right (v, Nothing)
 stepW _ (Pure a) = pure $ Left a
 
@@ -162,7 +161,7 @@ instance Monoid v => MultiAlternative (Widget v) where
     never = _display mempty
 
     -- Single child fast path without threads
-    orr [w] = go (step w)
+    orr [w] = go (unWidget w)
       where
         go widget = do
             stepped <- io $ stepW mempty widget
@@ -178,7 +177,7 @@ instance Monoid v => MultiAlternative (Widget v) where
     -- General threaded case
     orr ws = do
         mvar <- io newEmptyMVar
-        comb mvar $ fmap (Left . step) ws
+        comb mvar $ fmap (Left . unWidget) ws
       where
         comb :: MVar (Int, Free (SuspendF v) a) -> [Either (Free (SuspendF v) a) (v, Maybe ThreadId)] -> Widget v a
         comb mvar widgets = do
