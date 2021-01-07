@@ -159,19 +159,26 @@ stepW _ (Pure a) = pure $ Left a
 instance Monoid v => MultiAlternative (Widget v) where
     never = _display mempty
 
-    -- Single child fast path without threads
-    orr [w] = go (unWidget w)
-      where
-        go widget = do
-            stepped <- io $ stepW mempty widget
+    orr [w] = w
 
-            case stepped of
-                Left a -> pure a
-                Right (v, Nothing) -> _view v >> forever
-                Right (v, Just await) -> do
-                    _view v
-                    next <- effect await
-                    go next
+    -- Following commented out code is the previous implementation for case [w].
+    -- I don't think we need to interpret given Widget.
+    -- Just past it bellow should be enough and also most efficient.
+    -- But I'm not sure so I'll keep this code as comment.
+
+    -- Single child fast path without threads
+    -- orr [w] = go (unWidget w)
+    --   where
+    --     go widget = do
+    --         stepped <- io $ stepW mempty widget
+
+    --         case stepped of
+    --             Left a -> pure a
+    --             Right (v, Nothing) -> _view v >> forever
+    --             Right (v, Just await) -> do
+    --                 _view v
+    --                 next <- effect await
+    --                 go next
 
     -- General threaded case
     orr ws = do
