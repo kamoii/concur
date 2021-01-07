@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
@@ -35,11 +36,12 @@ import Control.MultiAlternative (MultiAlternative, never, orr)
 
 import qualified Concur.Core.Notify as N
 
--- | Functor for Widegt Free Monad
---
--- `Forever' constructor should be semantically same as `StepBlock (forever (threadDelay maxBound))'.
--- It gives us more information than opaque StepBlock constructor, making some optimization possible.
--- It makes interpreters possible to terminate.
+{- | Functor for Widegt Free Monad
+
+ `Forever' constructor should be semantically same as `StepBlock (forever (threadDelay maxBound))'.
+ It gives us more information than opaque StepBlock constructor, making some optimization possible.
+ It makes interpreters possible to terminate.
+-}
 data SuspendF v next
     = StepView v next
     | StepBlock (IO next)
@@ -154,6 +156,14 @@ instance Monoid v => Alternative (Widget v) where
     empty = never
     f <|> g = orr [f, g]
 
+-- To avoid Either-blindness and Maybe-blindness,
+-- define data types solely for implementating orr.
+data ChildWidget v a
+    = Idling (Free (SuspendF v) a)
+    | Running v ThreadId
+    | Terminated v
+
+--
 stepW :: v -> Free (SuspendF v) a -> IO (Either a (v, Maybe (IO (Free (SuspendF v) a))))
 stepW _ (Free (StepView v next)) = stepW v next
 stepW v (Free (StepIO a)) = a >>= stepW v
@@ -167,13 +177,12 @@ instance Monoid v => MultiAlternative (Widget v) where
     -- Addhing this pattarn-match doesn't change semantics.
     -- Instead of foerver-blocking StepBlock, we get Forever, which can be used to optimize.
     orr [] = _display mempty
-
-    orr [w] = w
+    -- Single child widget
     -- Following commented out code is the previous implementation for case [w].
     -- I don't think we need to interpret given Widget.
     -- Just past it bellow should be enough and also most efficient.
     -- But I'm not sure so I'll keep this code as comment.
-
+    orr [w] = w
     -- Single child fast path without threads
     -- orr [w] = go (unWidget w)
     --   where
@@ -191,14 +200,21 @@ instance Monoid v => MultiAlternative (Widget v) where
     -- General threaded case
     orr ws = do
         mvar <- io newEmptyMVar
-        comb mvar $ fmap (Left . unWidget) ws
+        comb mvar $ fmap (Idling . unWidget) ws
       where
-        comb :: MVar (Int, Free (SuspendF v) a) -> [Either (Free (SuspendF v) a) (v, Maybe ThreadId)] -> Widget v a
+        comb ::
+            MVar (Int, Free (SuspendF v) a) ->
+            [ChildWidget v a] ->
+            Widget v a
         comb mvar widgets = do
+            -- 外側の Either の Left が値を得たときに必要
+            -- 例え一番目の Widget が pure で即座に値を返そうが,後続のWidget の先頭の io は実行される。
+            -- 公平性の観点からはいいのか？ただ どうせ 複数の Widget が 同時に値を返す場合に左偏重である。
             stepped <- io $
-                forM widgets $ \w -> case w of
-                    Left suspended -> either Left (Right . Left) <$> stepW mempty suspended
-                    Right (displayed, tid) -> pure $ Right $ Right (displayed, tid)
+                forM widgets $ \case
+                    Idling suspended -> either Left (Right . Left) <$> stepW mempty suspended
+                    Running displayed tid -> pure $ Right $ Right (displayed, Just tid)
+                    Terminated displayed -> pure $ Right $ Right (displayed, Nothing)
 
             case sequence stepped of
                 -- A widget finished, kill all running threads
@@ -216,18 +232,19 @@ instance Monoid v => MultiAlternative (Widget v) where
                     tids <- io $
                         forM (zip [0 ..] next) $ \(i, v) -> case v of
                             -- Start a new thread on encountering StepBlock
-                            Left (dv, Just await) -> fmap (Right . (dv,) . Just) $
+                            Left (dv, Just await) -> fmap (Running dv) $
                                 forkIO $ do
                                     a <- await
                                     putMVar mvar (i, a)
 
                             -- Neverending Widget, pass on
-                            Left (dv, Nothing) -> pure $ Right (dv, Nothing)
+                            Left (dv, Nothing) -> pure $ Terminated dv
                             -- Already running, pass on
-                            Right (dv, tid) -> pure $ Right (dv, tid)
+                            Right (dv, Just tid) -> pure $ Running dv tid
+                            Right (dv, Nothing) -> pure $ Terminated dv
 
                     (i, newWidget) <- effect $ takeMVar mvar
-                    comb mvar (take i tids ++ [Left newWidget] ++ drop (i + 1) tids)
+                    comb mvar (take i tids ++ [Idling newWidget] ++ drop (i + 1) tids)
 
 -- The default instance derives from Alternative
 instance Monoid v => MonadPlus (Widget v)
