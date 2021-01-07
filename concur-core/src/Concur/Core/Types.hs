@@ -35,6 +35,7 @@ import Control.Monad.Reader (MonadTrans (lift), ReaderT, mapReaderT)
 import Control.MultiAlternative (MultiAlternative, never, orr)
 
 import qualified Concur.Core.Notify as N
+import Data.Foldable (traverse_)
 
 {- | Functor for Widegt Free Monad
 
@@ -158,17 +159,26 @@ instance Monoid v => Alternative (Widget v) where
 
 -- To avoid Either-blindness and Maybe-blindness,
 -- define data types solely for implementating orr.
-data ChildWidget v a
-    = Idling (Free (SuspendF v) a)
-    | Running v ThreadId
-    | Terminated v
+data ChildWidget a
+    = Running ThreadId
+    | Terminated
+    deriving Eq
 
---
-stepW :: v -> Free (SuspendF v) a -> IO (Either a (v, Maybe (IO (Free (SuspendF v) a))))
+data BlockingIO v a
+    = BlockingIO (IO (Free (SuspendF v) a))
+    | BlockingForever
+
+isBlockingForever :: BlockingIO v a -> Bool
+isBlockingForever (BlockingIO _) = False
+isBlockingForever BlockingForever = True
+
+-- Import thing is that we evaluate `StepIO's effect.
+-- Result v is the last View before Blocking(StepBlock, StepForever).
+stepW :: v -> Free (SuspendF v) a -> IO (Either a (v, BlockingIO v a))
 stepW _ (Free (StepView v next)) = stepW v next
 stepW v (Free (StepIO a)) = a >>= stepW v
-stepW v (Free (StepBlock a)) = pure $ Right (v, Just a)
-stepW v (Free Forever) = pure $ Right (v, Nothing)
+stepW v (Free (StepBlock a)) = pure $ Right (v, BlockingIO a)
+stepW v (Free Forever) = pure $ Right (v, BlockingForever)
 stepW _ (Pure a) = pure $ Left a
 
 instance Monoid v => MultiAlternative (Widget v) where
@@ -198,53 +208,54 @@ instance Monoid v => MultiAlternative (Widget v) where
     --                 go next
 
     -- General threaded case
-    orr ws = do
-        mvar <- io newEmptyMVar
-        comb mvar $ fmap (Idling . unWidget) ws
+    orr ws = firstStep ws
       where
-        comb ::
-            MVar (Int, Free (SuspendF v) a) ->
-            [ChildWidget v a] ->
-            Widget v a
-        comb mvar widgets = do
-            -- 外側の Either の Left が値を得たときに必要
-            -- 例え一番目の Widget が pure で即座に値を返そうが,後続のWidget の先頭の io は実行される。
-            -- 公平性の観点からはいいのか？ただ どうせ 複数の Widget が 同時に値を返す場合に左偏重である。
-            stepped <- io $
-                forM widgets $ \case
-                    Idling suspended -> either Left (Right . Left) <$> stepW mempty suspended
-                    Running displayed tid -> pure $ Right $ Right (displayed, Just tid)
-                    Terminated displayed -> pure $ Right $ Right (displayed, Nothing)
-
-            case sequence stepped of
-                -- A widget finished, kill all running threads
-                Left a -> do
-                    io $
-                        sequence_
-                            [ killThread tid
-                            | Right (Right (_, Just tid)) <- stepped
-                            ]
+        firstStep :: [Widget v a] -> Widget v a
+        firstStep ws0 = do
+            ws' <- io $ traverse (stepW mempty . unWidget) ws0
+            case sequence ws' of
+                Left a ->
                     pure a
-                Right next -> do
-                    -- Display all current views
-                    _view $ mconcat $ map (either fst fst) next
+                Right ws -> do
+                    _view $ mconcat $ map fst ws
+                    if all isBlockingForever (map snd ws)
+                        then forever
+                        else running0 ws
 
-                    tids <- io $
-                        forM (zip [0 ..] next) $ \(i, v) -> case v of
-                            -- Start a new thread on encountering StepBlock
-                            Left (dv, Just await) -> fmap (Running dv) $
-                                forkIO $ do
-                                    a <- await
-                                    putMVar mvar (i, a)
+        -- There was atleast one BlockingIO.
+        -- Running all BlockingIO's
+        running0 :: [(v, BlockingIO v a)] -> Widget v a
+        running0 ws = do
+            mvar <- io newEmptyMVar
+            child <- io $ forM (zip [0 ..] ws) $ \(i, (v, b)) -> (v,) <$> forkBlockingIO mvar i v b
+            running mvar child
 
-                            -- Neverending Widget, pass on
-                            Left (dv, Nothing) -> pure $ Terminated dv
-                            -- Already running, pass on
-                            Right (dv, Just tid) -> pure $ Running dv tid
-                            Right (dv, Nothing) -> pure $ Terminated dv
+        -- Wait for one of running child to terminate and putMVar
+        running :: MVar (Int, v, Free (SuspendF v) a) -> [(v, ChildWidget a)] -> Widget v a
+        running mvar child = do
+            (i, v0, w) <- effect $ takeMVar mvar
+            r <- io $ stepW v0 w
+            case r of
+                Left a -> do
+                    io $ traverse_ killThread [tid | (_, Running tid) <- child]
+                    pure a
+                Right (v, blocking) -> do
+                    _view $ mconcat $ take i (map fst child) <> [v] <> drop (i + 1) (map fst child)
+                    c <- io $ forkBlockingIO mvar i v blocking
+                    let newChild = take i child <> [(v, c)] <> drop (i + 1) child
+                    if c == Terminated && all isTerminated (map snd newChild)
+                        then forever
+                        else running mvar newChild
 
-                    (i, newWidget) <- effect $ takeMVar mvar
-                    comb mvar (take i tids ++ [Idling newWidget] ++ drop (i + 1) tids)
+        forkBlockingIO mvar index v = \case
+            BlockingIO bio -> fmap Running $
+                forkIO $ do
+                    a <- bio
+                    putMVar mvar (index, v, a)
+            BlockingForever -> pure Terminated
+
+        isTerminated Terminated = True
+        isTerminated _ = False
 
 -- The default instance derives from Alternative
 instance Monoid v => MonadPlus (Widget v)
