@@ -43,16 +43,25 @@ testAlternative :: TestTree
 testAlternative =
     testGroup
         "orr/Alternative"
-        [ testCase "immediate" $ do
+        [ testCase "immediate(1)" $ do
             -- left-biased
             ops <- runWidget $ pure "a" <|> pure "b"
             ops @?= [WODone "a"]
-        , testCase "immediate'" $ do
+        , testCase "immediate(2)" $ do
             ops <- runWidget $ display "a" <|> pure ()
             ops @?= [WODone ()]
-        , testCase "immediate''" $ do
+        , testCase "immediate(3)" $ do
             ops <- runWidget $ pure () <|> display "a"
             ops @?= [WODone ()]
+        , testCase "immediate(4)" $ do
+            -- When a Widget returns immediately,
+            -- should we evaluate following Widgets io effect?
+            -- Currently it does, but I think it cuold be otherwise.
+            ref <- IORef.newIORef (1 :: Int)
+            ops <- runWidget $ orr [pure (), liftUnsafeBlockingIO (IORef.writeIORef ref 2)]
+            ops @?= [WODone ()]
+            val <- IORef.readIORef ref
+            val @?= 2
         , testCase "zero-time" $ do
             ops <- runWidget $ display "a" <|> waitFor 0
             ops @?= [WOView "a", WODone ()]
