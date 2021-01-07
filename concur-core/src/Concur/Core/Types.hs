@@ -168,19 +168,6 @@ data BlockingIO v a
     = BlockingIO (IO (Free (SuspendF v) a))
     | BlockingForever
 
-isBlockingForever :: BlockingIO v a -> Bool
-isBlockingForever (BlockingIO _) = False
-isBlockingForever BlockingForever = True
-
--- Import thing is that we evaluate `StepIO's effect.
--- Result v is the last View before Blocking(StepBlock, StepForever).
-stepW :: v -> Free (SuspendF v) a -> IO (Either a (v, BlockingIO v a))
-stepW _ (Free (StepView v next)) = stepW v next
-stepW v (Free (StepIO a)) = a >>= stepW v
-stepW v (Free (StepBlock a)) = pure $ Right (v, BlockingIO a)
-stepW v (Free Forever) = pure $ Right (v, BlockingForever)
-stepW _ (Pure a) = pure $ Left a
-
 instance Monoid v => MultiAlternative (Widget v) where
     never = _display mempty
 
@@ -197,7 +184,7 @@ instance Monoid v => MultiAlternative (Widget v) where
     -- orr [w] = go (unWidget w)
     --   where
     --     go widget = do
-    --         stepped <- io $ stepW mempty widget
+    --         stepped <- io $ step mempty widget
 
     --         case stepped of
     --             Left a -> pure a
@@ -212,13 +199,13 @@ instance Monoid v => MultiAlternative (Widget v) where
       where
         firstStep :: [Widget v a] -> Widget v a
         firstStep ws0 = do
-            ws' <- io $ traverse (stepW mempty . unWidget) ws0
+            ws' <- io $ traverse (step mempty . unWidget) ws0
             case sequence ws' of
                 Left a ->
                     pure a
                 Right ws -> do
                     _view $ mconcat $ map fst ws
-                    if all isBlockingForever (map snd ws)
+                    if all isBlockingForever (fmap snd ws)
                         then forever
                         else running0 ws
 
@@ -234,7 +221,7 @@ instance Monoid v => MultiAlternative (Widget v) where
         running :: MVar (Int, v, Free (SuspendF v) a) -> [(v, ChildWidget a)] -> Widget v a
         running mvar child = do
             (i, v0, w) <- effect $ takeMVar mvar
-            r <- io $ stepW v0 w
+            r <- io $ step v0 w
             case r of
                 Left a -> do
                     io $ traverse_ killThread [tid | (_, Running tid) <- child]
@@ -243,7 +230,7 @@ instance Monoid v => MultiAlternative (Widget v) where
                     _view $ mconcat $ take i (map fst child) <> [v] <> drop (i + 1) (map fst child)
                     c <- io $ forkBlockingIO mvar i v blocking
                     let newChild = take i child <> [(v, c)] <> drop (i + 1) child
-                    if c == Terminated && all isTerminated (map snd newChild)
+                    if c == Terminated && all isTerminated (fmap snd newChild)
                         then forever
                         else running mvar newChild
 
@@ -254,8 +241,21 @@ instance Monoid v => MultiAlternative (Widget v) where
                     putMVar mvar (index, v, a)
             BlockingForever -> pure Terminated
 
+        -- Import thing is that we evaluate `StepIO's effect.
+        -- Result v is the last View before Blocking(StepBlock, StepForever).
+        step :: v -> Free (SuspendF v) a -> IO (Either a (v, BlockingIO v a))
+        step _ (Free (StepView v next)) = step v next
+        step v (Free (StepIO a)) = a >>= step v
+        step v (Free (StepBlock a)) = pure $ Right (v, BlockingIO a)
+        step v (Free Forever) = pure $ Right (v, BlockingForever)
+        step _ (Pure a) = pure $ Left a
+
         isTerminated Terminated = True
         isTerminated _ = False
+
+        isBlockingForever (BlockingIO _) = False
+        isBlockingForever BlockingForever = True
+
 
 -- The default instance derives from Alternative
 instance Monoid v => MonadPlus (Widget v)
