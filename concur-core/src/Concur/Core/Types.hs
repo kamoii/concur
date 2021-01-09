@@ -299,8 +299,11 @@ instance Monoid v => MultiAlternative (Widget v) where
         -- "orphan thread"s. (note 1).
         --
         -- Thus, to solve this problem, we'll make `effect' have another
-        -- argument "Canceller", which has type `ThreadId -> IO ()'.
+        -- argument "Canceller", which has type `ThreadId -> IO ()'. Canceller's
+        -- responsbility is to terminate its corresponding effect thread,
+        -- including its descnedants.
         --
+        --  * Corresponding effect thread might be termianted at the point when canceller is invoked (note 2)
         --  * Canceller will be executed inside main thread
         --  * Canceller should not raise any syncrounous exception
         --
@@ -311,6 +314,14 @@ instance Monoid v => MultiAlternative (Widget v) where
         -- of (1) to `readMVar' might look like it'll work, but still there is
         -- case which orphan thread occurs.
         --
+        -- note 2:
+        --
+        -- This means its result(continuation) chould be already putted to
+        -- MVar. Meaning we might accidenatly revoke the widget we are trying to
+        -- cancel. But since the thread pass from current `orr' to root is all
+        -- terminated, the result should't be propageted further.
+        --
+        -- TODO: I'm not exactly sure about note 2. Maybe we need to adjust we to empty those MVar's...
         -- TODO: If there is only one Widget left, we could just return that widget with proper `mapView'
         -- This will reduce the ammount of thread needed.
         running :: MVar (Int, v, Free (SuspendF v) a) -> [(v, ChildWidget a)] -> Widget v a
