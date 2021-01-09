@@ -57,6 +57,10 @@ newtype Widget v a = Widget {unWidget :: Free (SuspendF v) a}
 _view :: v -> Widget v ()
 _view v = Widget $ liftF $ StepView v ()
 
+-- blocking io
+--
+--  * Action is usually executed in a different thread(
+--  *
 effect :: IO a -> Widget v a
 effect a = Widget $ liftF $ StepBlock a
 
