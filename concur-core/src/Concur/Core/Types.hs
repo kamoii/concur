@@ -105,9 +105,9 @@ io a = Widget $ liftF $ StepIO a
  then `orr' widget itself will terminate with this value, ignoring exeption rasied by
  widgetB.
 
- The reason behind this semantic is that, other than it is easy to implement, is that
- if processing widgets in main thread had ideally zero-time cost, then widgetB has been
- cancelled before it raised an error.
+ The reasoning behind this semantic is that, other than it is easy to implement,
+ if processing widgets in main thread had ideally zero-time cost, then widgetB should
+ had been cancelled before it raised an exception.
 
  Also, there is more complex scenario where two are more effects raises exception almost
  at the same time, or `catch' is involed, but the key thing is that exception are not
@@ -115,7 +115,6 @@ io a = Widget $ liftF $ StepIO a
 
  2) All exception raised inside `io' will be propagated.
     Since `io' is always executed by main thread.
-
 -}
 forever :: Widget v a
 forever = Widget $ liftF Forever
@@ -271,12 +270,52 @@ instance Monoid v => MultiAlternative (Widget v) where
             child <- io $ forM (zip [0 ..] ws) $ \(i, (v, b)) -> (v,) <$> forkBlockingIO mvar i v b
             running mvar child
 
-        -- Wait for one of running child to terminate and putMVar
+        -- Wait for one of child effect thread to terminate and puts its widget
+        -- continuation (or exception value) in MVar. This "waiting" is done by
+        -- `effect', which we'll call ""intermediate waiting". If there is a
+        -- parent `orr', this effect will be executed in a thread by its parent,
+        -- and if it terminates first, `orr''s widget continuation after point
+        -- (1) will be putted to parents MVar (Yay! Recursion :)). If there is
+        -- no parent `orr', this effect will executed inside main thread by
+        -- top-level interpreter.
+        --
+        -- Note about cancelling:
+        --
+        -- When one of the child widget terminates with a value or an exception,
+        -- we need to terminate all other child widget's and its decending
+        -- widget's effect threads before we terminate `orr' widget with given
+        -- value or propaget exception with `io'. Or else we might leak threads.
+        --
+        -- Just sending asynchronous exception with `killThread' is not enough.
+        -- If all of the subling threads were "real effect thread", then thats
+        -- enough, but if any of them are "intermediate waiting thread", then
+        -- its decendants threads might leak.
+        --
+        -- One solution you might think is to imitate thread tree from `async'
+        -- library, where thread forms a tree, and terminating a node thread
+        -- will cause killing entire subtree to termiante, preventing
+        -- thread-leaks. We can't take this approuch since "intermediate waiting
+        -- thread" can terminate eariler than its desending threads, making
+        -- "orphan thread"s. (note 1).
+        --
+        -- Thus, to solve this problem, we'll make `effect' have another
+        -- argument "Canceller", which has type `ThreadId -> IO ()'.
+        --
+        --  * Canceller will be executed inside main thread
+        --  * Canceller should not raise any syncrounous exception
+        --
+        -- note 1:
+        --
+        -- There might be a way not to terminate "intermediate waiting threads"
+        -- before its descedants, but haven't figured it out. Changing `takeMVar'
+        -- of (1) to `readMVar' might look like it'll work, but still there is
+        -- case which orphan thread occurs.
+        --
         -- TODO: If there is only one Widget left, we could just return that widget with proper `mapView'
         -- This will reduce the ammount of thread needed.
         running :: MVar (Int, v, Free (SuspendF v) a) -> [(v, ChildWidget a)] -> Widget v a
         running mvar child = do
-            (i, v0, w) <- effect $ takeMVar mvar
+            (i, v0, w) <- effect $ takeMVar mvar -- (1)
             r <- io $ step v0 w
             case r of
                 Left a -> do
