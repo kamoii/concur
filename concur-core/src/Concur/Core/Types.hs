@@ -105,7 +105,9 @@ io a = Widget $ liftF $ StepIO a
  then `orr' widget itself will terminate with this value, ignoring exeption rasied by
  widgetB.
 
- The reason behind this semantic is that,
+ The reason behind this semantic is that, other than it is easy to implement, is that
+ if processing widgets in main thread had ideally zero-time cost, then widgetB has been
+ cancelled before it raised an error.
 
  Also, there is more complex scenario where two are more effects raises exception almost
  at the same time, or `catch' is involed, but the key thing is that exception are not
