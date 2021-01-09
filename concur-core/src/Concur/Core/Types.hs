@@ -64,10 +64,10 @@ _view v = Widget $ liftF $ StepView v ()
   * Do not catch asynchronous exception and continue. It will leak thread.
     Cleaning resource with `bracket'-pattern is ok, but while cleaning concur will stop.
     Asynchronous exception are throwned by concur model, not external.
-  * Raising a synchronous exception, if handled, will propagate upwords the concur tree formed by `orr',
-    cancelling subling and its descending effect threads.
-    Not all excpetion is
-    If catched by `catch`, it will stop there. Otherwise, main thread of concur would raise
+  * Raising a synchronous exception, if handled, will propagate upwords the
+    concur tree formed by `orr' inside main thread, cancelling subling and its descending effect threads.
+    Be aware that not all excpetion is handled (see the note bellow).
+    If catched by `catch`, it will stop there. Otherwise, main thread of concur would raise exception.
 -}
 effect :: IO a -> Widget v a
 effect a = Widget $ liftF $ StepBlock a
@@ -84,7 +84,7 @@ effect a = Widget $ liftF $ StepBlock a
     Asynchronous exception are throwned by external.
   * Raising a synchronous exception will propagate upwords the concur tree formed by `orr',
     cancelling subling and its descending effect threads.
-    If catched by `catch`, it will stop there. Otherwise, main thread of concur would raise
+    If catched by `catch`, it will stop there. Otherwise, main thread of concur would raise exception.
 -}
 io :: IO a -> Widget v a
 io a = Widget $ liftF $ StepIO a
@@ -92,7 +92,7 @@ io a = Widget $ liftF $ StepIO a
 {- | Note about synchronous exception
 
  1) Not all exception raised by effect will propagated to main thread.
-    Only one that its result value was handled by
+    Only ones that its result value, which is exception, was handled by main thread.
 
  For example, we have a orr widget with two child widget with effect,
  widgetA and widgetB:
@@ -105,10 +105,16 @@ io a = Widget $ liftF $ StepIO a
  then `orr' widget itself will terminate with this value, ignoring exeption rasied by
  widgetB.
 
- 2) All exception raised inside `io' will be propagated.
-    Since `io' is always executed by
--}
+ The reason behind this semantic is that,
 
+ Also, there is more complex scenario where two are more effects raises exception almost
+ at the same time, or `catch' is involed, but the key thing is that exception are not
+ recongised until main thread takes that information out of mvar.
+
+ 2) All exception raised inside `io' will be propagated.
+    Since `io' is always executed by main thread.
+
+-}
 forever :: Widget v a
 forever = Widget $ liftF Forever
 
