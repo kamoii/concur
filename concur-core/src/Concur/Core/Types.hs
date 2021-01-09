@@ -35,9 +35,12 @@ import Control.Monad.Reader (MonadTrans (lift), ReaderT, mapReaderT)
 import Control.MultiAlternative (MultiAlternative, never, orr)
 
 import qualified Concur.Core.Notify as N
-import Data.Foldable (traverse_)
 
 {- | Functor for Widegt Free Monad
+
+ `(ThreadId -> IO ())' of `StepBlock' is called canceller. For the details refer
+ "note about cancelling". Its purely for internall implemenation. Top-level
+ intepreter could just ignore it.
 
  `Forever' constructor should be semantically same as `StepBlock (forever (threadDelay maxBound))'.
  It gives us more information than opaque StepBlock constructor, making some optimization possible.
@@ -45,9 +48,11 @@ import Data.Foldable (traverse_)
 -}
 data SuspendF v next
     = StepView v next
-    | StepBlock (IO next)
+    | StepBlock Canceller (IO next)
     | StepIO (IO next)
     | Forever
+
+type Canceller = ThreadId -> IO ()
 
 deriving instance Functor (SuspendF v)
 
@@ -70,7 +75,10 @@ _view v = Widget $ liftF $ StepView v ()
     If catched by `catch`, it will stop there. Otherwise, main thread of concur would raise exception.
 -}
 effect :: IO a -> Widget v a
-effect a = Widget $ liftF $ StepBlock a
+effect = effect' killThread
+
+effect' :: Canceller -> IO a -> Widget v a
+effect' c a = Widget $ liftF $ StepBlock c a
 
 {- | IO witch will executed synchronously
 
@@ -132,7 +140,7 @@ _mapView f (Widget w) = Widget $ go w
     go = hoistFree g
     g (StepView v next) = StepView (f v) next
     g (StepIO a) = StepIO a
-    g (StepBlock a) = StepBlock a
+    g (StepBlock c a) = StepBlock c a
     g Forever = Forever
 
 -- Generic widget view wrapper
@@ -146,9 +154,8 @@ _throwM = io . throwIO
 
 {- | Catch exception (Experimental implementation)
  Catches syncrounous exception caused by `io' or `effect'.
- scoped operation なので当然 interpreter が必要になる。
- 同期例外は補足可能。
- 非同期例外は補足できる場合とそうでない場合が多分ある。
+
+ TODO: Should not capture asynchronous exception.
 -}
 _catch :: forall a e v. Exception e => Widget v a -> (e -> Widget v a) -> Widget v a
 _catch (Widget w) handler = step w
@@ -156,7 +163,7 @@ _catch (Widget w) handler = step w
     step :: Free (SuspendF v) a -> Widget v a
     step (Free (StepView v next)) = _view v *> step next
     step (Free (StepIO a)) = io (try @e a) >>= either handler step
-    step (Free (StepBlock a)) = effect (try @e a) >>= either handler step
+    step (Free (StepBlock c a)) = effect' c (try @e a) >>= either handler step
     step (Free Forever) = forever
     step (Pure a) = pure a
 
@@ -213,12 +220,11 @@ instance Monoid v => Alternative (Widget v) where
 -- To avoid Either-blindness and Maybe-blindness,
 -- define data types solely for implementating orr.
 data ChildWidget a
-    = Running ThreadId
+    = Running (IO ())
     | Terminated
-    deriving (Eq)
 
 data BlockingIO v a
-    = BlockingIO (IO (Free (SuspendF v) a))
+    = BlockingIO Canceller (IO (Free (SuspendF v) a))
     | BlockingForever
 
 instance Monoid v => MultiAlternative (Widget v) where
@@ -327,40 +333,44 @@ instance Monoid v => MultiAlternative (Widget v) where
         -- This will reduce the ammount of thread needed.
         running :: MVar (Int, v, Free (SuspendF v) a) -> [(v, ChildWidget a)] -> Widget v a
         running mvar child = do
-            (i, v0, w) <- effect $ takeMVar mvar -- (1)
+            let cancelChilds = sequence_ [canceller | (_, Running canceller) <- child]
+            let canceller tid = cancelChilds *> killThread tid
+            (i, v0, w) <- effect' canceller $ takeMVar mvar -- (1)
             r <- io $ step v0 w
             case r of
                 Left a -> do
-                    io $ traverse_ killThread [tid | (_, Running tid) <- child]
+                    io cancelChilds
                     pure a
                 Right (v, blocking) -> do
                     _view $ mconcat $ take i (map fst child) <> [v] <> drop (i + 1) (map fst child)
                     c <- io $ forkBlockingIO mvar i v blocking
                     let newChild = take i child <> [(v, c)] <> drop (i + 1) child
-                    if c == Terminated && all isTerminated (fmap snd newChild)
+                    if isTerminated c && all isTerminated (fmap snd newChild)
                         then forever
                         else running mvar newChild
 
         forkBlockingIO mvar index v = \case
-            BlockingIO bio -> fmap Running $
-                forkIO $ do
-                    a <- bio
-                    putMVar mvar (index, v, a)
-            BlockingForever -> pure Terminated
+            BlockingIO c io ->
+                fmap (Running . c) $
+                    forkIO $ do
+                        a <- io
+                        putMVar mvar (index, v, a)
+            BlockingForever ->
+                pure Terminated
 
         -- Import thing is that we evaluate `StepIO's effect.
         -- Result v is the last View before Blocking(StepBlock, StepForever).
         step :: v -> Free (SuspendF v) a -> IO (Either a (v, BlockingIO v a))
         step _ (Free (StepView v next)) = step v next
         step v (Free (StepIO a)) = a >>= step v
-        step v (Free (StepBlock a)) = pure $ Right (v, BlockingIO a)
+        step v (Free (StepBlock c a)) = pure $ Right (v, BlockingIO c a)
         step v (Free Forever) = pure $ Right (v, BlockingForever)
         step _ (Pure a) = pure $ Left a
 
         isTerminated Terminated = True
         isTerminated _ = False
 
-        isBlockingForever (BlockingIO _) = False
+        isBlockingForever (BlockingIO _ _) = False
         isBlockingForever BlockingForever = True
 
 -- The default instance derives from Alternative
