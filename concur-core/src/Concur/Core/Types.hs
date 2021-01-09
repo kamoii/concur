@@ -57,13 +57,34 @@ newtype Widget v a = Widget {unWidget :: Free (SuspendF v) a}
 _view :: v -> Widget v ()
 _view v = Widget $ liftF $ StepView v ()
 
--- blocking io
---
---  * Action is usually executed in a different thread(
---  *
+{- | IO witch will exectued concurrently
+
+  * effect is usually executed in a different thread for concurrency.
+    Exception is that when there is only one effect, which doesn't need to run concurrently.
+  * Do not catch asynchronous exception and continue. It will leak thread.
+    Cleaning resource with `bracket'-pattern is ok, but while cleaning concur will stop.
+    Asynchronous exception are throwned by concur model, not external.
+  * Raising a synchronous exception will propagate upwords the concur tree formed by `orr',
+    cancelling subling and its descending effect threads.
+    If catched by `catch`, it will stop there. Otherwise, main thread of concur would raise
+-}
 effect :: IO a -> Widget v a
 effect a = Widget $ liftF $ StepBlock a
 
+{- | IO witch will executed synchronously
+
+ Of course the exact semenatic is determined by the free monad interpreter.
+ Here we assume the interpreter will simply execute IO synchonously.
+
+  * io is executed by the main thread of concur.
+  * While exectuing io it will block the whole concur model, so be sure to make it short.
+  * Do not catch asynchronous exception and continue. It will keap concur alive when it should die.
+    Cleaning resource with `bracket'-pattern is ok, but while cleaning concur will stop.
+    Asynchronous exception are throwned by external.
+  * Raising a synchronous exception will propagate upwords the concur tree formed by `orr',
+    cancelling subling and its descending effect threads.
+    If catched by `catch`, it will stop there. Otherwise, main thread of concur would raise
+-}
 io :: IO a -> Widget v a
 io a = Widget $ liftF $ StepIO a
 
@@ -166,7 +187,7 @@ instance Monoid v => Alternative (Widget v) where
 data ChildWidget a
     = Running ThreadId
     | Terminated
-    deriving Eq
+    deriving (Eq)
 
 data BlockingIO v a
     = BlockingIO (IO (Free (SuspendF v) a))
@@ -222,6 +243,8 @@ instance Monoid v => MultiAlternative (Widget v) where
             running mvar child
 
         -- Wait for one of running child to terminate and putMVar
+        -- TODO: If there is only one Widget left, we could just return that widget with proper `mapView'
+        -- This will reduce the ammount of thread needed.
         running :: MVar (Int, v, Free (SuspendF v) a) -> [(v, ChildWidget a)] -> Widget v a
         running mvar child = do
             (i, v0, w) <- effect $ takeMVar mvar
@@ -259,7 +282,6 @@ instance Monoid v => MultiAlternative (Widget v) where
 
         isBlockingForever (BlockingIO _) = False
         isBlockingForever BlockingForever = True
-
 
 -- The default instance derives from Alternative
 instance Monoid v => MonadPlus (Widget v)
