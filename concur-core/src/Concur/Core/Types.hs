@@ -300,10 +300,11 @@ instance Monoid v => MultiAlternative (Widget v) where
         --
         -- Thus, to solve this problem, we'll make `effect' have another
         -- argument "Canceller", which has type `ThreadId -> IO ()'. Canceller's
-        -- responsbility is to terminate its corresponding effect thread,
-        -- including its descnedants.
+        -- responsbility is to terminate its corresponding effect thread given
+        -- by its thread id, including its descnedants. be carefull that:
         --
-        --  * Corresponding effect thread might be termianted at the point when canceller is invoked (note 2)
+        --  * Corresponding effect thread might be termianted at the point
+        --    when canceller is invoked (note 2)
         --  * Canceller will be executed inside main thread
         --  * Canceller should not raise any syncrounous exception
         --
