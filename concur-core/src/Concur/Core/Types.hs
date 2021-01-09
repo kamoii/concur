@@ -64,8 +64,9 @@ _view v = Widget $ liftF $ StepView v ()
   * Do not catch asynchronous exception and continue. It will leak thread.
     Cleaning resource with `bracket'-pattern is ok, but while cleaning concur will stop.
     Asynchronous exception are throwned by concur model, not external.
-  * Raising a synchronous exception will propagate upwords the concur tree formed by `orr',
+  * Raising a synchronous exception, if handled, will propagate upwords the concur tree formed by `orr',
     cancelling subling and its descending effect threads.
+    Not all excpetion is
     If catched by `catch`, it will stop there. Otherwise, main thread of concur would raise
 -}
 effect :: IO a -> Widget v a
@@ -87,6 +88,26 @@ effect a = Widget $ liftF $ StepBlock a
 -}
 io :: IO a -> Widget v a
 io a = Widget $ liftF $ StepIO a
+
+{- | Note about synchronous exception
+
+ 1) Not all exception raised by effect will propagated to main thread.
+    Only one that its result value was handled by
+
+ For example, we have a orr widget with two child widget with effect,
+ widgetA and widgetB:
+
+    orr [ widgetA, widgetB ]
+
+ say, widgetA's effect completed first. While the main thread handling widgetA,
+ processing its continuation, widgetB's effect might raise a synchronous excpetion.
+ If the result of processing widgetA continuation leads to termination with a value,
+ then `orr' widget itself will terminate with this value, ignoring exeption rasied by
+ widgetB.
+
+ 2) All exception raised inside `io' will be propagated.
+    Since `io' is always executed by
+-}
 
 forever :: Widget v a
 forever = Widget $ liftF Forever
