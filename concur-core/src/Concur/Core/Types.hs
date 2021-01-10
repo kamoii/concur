@@ -36,6 +36,9 @@ import Control.Monad.Reader (MonadTrans (lift), ReaderT, mapReaderT)
 import Control.MultiAlternative (MultiAlternative, never, orr)
 
 import qualified Concur.Core.Notify as N
+import Data.Bifunctor (Bifunctor (first))
+import Data.Maybe (fromMaybe)
+import Data.Functor (($>))
 
 {- | Functor for Widegt Free Monad
 
@@ -262,6 +265,10 @@ instance Monoid v => MultiAlternative (Widget v) where
     --                 go next
 
     -- General threaded case
+    --
+    -- (1)
+    -- We will always update view before executing block ios.
+    -- If a child widget didn't raise any view, `mempty' will be used.
     orr ws = firstStep ws
       where
         firstStep :: [Widget v a] -> Widget v a
@@ -270,7 +277,8 @@ instance Monoid v => MultiAlternative (Widget v) where
             case sequence ws' of
                 Left a ->
                     pure a
-                Right ws -> do
+                Right ws'' -> do
+                    let ws = fmap (first (fromMaybe mempty)) ws'' -- (1)
                     _view $ mconcat $ map fst ws
                     if all isBlockingForever (fmap snd ws)
                         then forever
@@ -358,13 +366,19 @@ instance Monoid v => MultiAlternative (Widget v) where
                 Left e -> do
                     io $ cancelChilds *> Safe.throwIO e
                 Right (i, v0, w) -> do
-                    r1 <- io $ step v0 w `Safe.onException` cancelChilds -- (2)
+                    r1 <- io $ step Nothing w `Safe.onException` cancelChilds -- (2)
                     case r1 of
                         Left a -> do
                             io cancelChilds
                             pure a
-                        Right (v, blocking) -> do
-                            _view $ mconcat $ take i (map fst child) <> [v] <> drop (i + 1) (map fst child)
+                        Right (mv, blocking) -> do
+                            -- Only update view if widget yeild any view before we reach the next blocking.
+                            -- There is no meaning updating view with the previous view (v0).
+                            v <- case mv of
+                                Just v -> do
+                                    _view $ mconcat $ take i (map fst child) <> [v] <> drop (i + 1) (map fst child)
+                                    pure v
+                                Nothing -> pure v0
                             c <- io $ forkBlockingIO mvar i v blocking
                             let newChild = take i child <> [(v, c)] <> drop (i + 1) child
                             if isTerminated c && all isTerminated (fmap snd newChild)
@@ -395,8 +409,8 @@ instance Monoid v => MultiAlternative (Widget v) where
 
         -- Import thing is that we evaluate `StepIO's effect.
         -- Result v is the last View before Blocking(StepBlock, StepForever).
-        step :: v -> Free (SuspendF v) a -> IO (Either a (v, BlockingIO v a))
-        step _ (Free (StepView v next)) = step v next
+        step :: Maybe v -> Free (SuspendF v) a -> IO (Either a (Maybe v, BlockingIO v a))
+        step _ (Free (StepView v next)) = step (Just v) next
         step v (Free (StepIO a)) = a >>= step v
         step v (Free (StepBlock c a)) = pure $ Right (v, BlockingIO c a)
         step v (Free Forever) = pure $ Right (v, BlockingForever)
