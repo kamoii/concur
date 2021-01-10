@@ -166,8 +166,7 @@ testException =
         , testCatchAlternative
         , testCatchAlternative'
         , testCatchEffect
-        -- TODO: Currently freezes
-        -- , testCatchEffect'
+        , testCatchEffect'
         ]
   where
     testNoThrow = testCase "no throw" $ do

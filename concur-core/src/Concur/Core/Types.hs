@@ -26,7 +26,8 @@ module Concur.Core.Types (
 
 import Control.Applicative (Alternative, empty, (<|>))
 import Control.Concurrent (MVar, ThreadId, forkIO, killThread, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (Exception, throwIO, try)
+import Control.Exception.Safe (Exception, SomeException)
+import Control.Exception.Safe as Safe (finally, onException, throwIO, try)
 import Control.Monad (MonadPlus (..), forM)
 import Control.Monad.Catch (MonadCatch (..), MonadThrow (..))
 import Control.Monad.Free (Free (..), hoistFree, liftF)
@@ -52,7 +53,7 @@ data SuspendF v next
     | StepIO (IO next)
     | Forever
 
-type Canceller = ThreadId -> IO ()
+type Canceller = ThreadId -> MVar () -> IO ()
 
 deriving instance Functor (SuspendF v)
 
@@ -75,7 +76,14 @@ _view v = Widget $ liftF $ StepView v ()
     If catched by `catch`, it will stop there. Otherwise, main thread of concur would raise exception.
 -}
 effect :: IO a -> Widget v a
-effect = effect' killThread
+effect = effect' _defaultCanceller
+
+-- Its important `killThread' even if the doneVar is already fill.
+-- See implemnatation note for `orr'.
+_defaultCanceller :: Canceller
+_defaultCanceller tid doneVar = do
+    killThread tid
+    takeMVar doneVar
 
 effect' :: Canceller -> IO a -> Widget v a
 effect' c a = Widget $ liftF $ StepBlock c a
@@ -154,16 +162,16 @@ _throwM = io . throwIO
 
 {- | Catch exception (Experimental implementation)
  Catches syncrounous exception caused by `io' or `effect'.
-
- TODO: Should not capture asynchronous exception.
+ Only syncrounous exception is catched.
+ Syncrounous exception is not determined by exception has `SomeAsyncException' in its hierarchy.
 -}
 _catch :: forall a e v. Exception e => Widget v a -> (e -> Widget v a) -> Widget v a
 _catch (Widget w) handler = step w
   where
     step :: Free (SuspendF v) a -> Widget v a
     step (Free (StepView v next)) = _view v *> step next
-    step (Free (StepIO a)) = io (try @e a) >>= either handler step
-    step (Free (StepBlock c a)) = effect' c (try @e a) >>= either handler step
+    step (Free (StepIO a)) = io (Safe.try @_ @e a) >>= either handler step
+    step (Free (StepBlock c a)) = effect' c (Safe.try @_ @e a) >>= either handler step
     step (Free Forever) = forever
     step (Pure a) = pure a
 
@@ -328,33 +336,60 @@ instance Monoid v => MultiAlternative (Widget v) where
         -- cancel. But since the thread pass from current `orr' to root is all
         -- terminated, the result should't be propageted further.
         --
+        -- We need (2) since Syncrounous exception raised in `effect' will be
+        -- raised through `io'. Actually `onException' handles asynchronous
+        -- exception too. We don't need to handle asynchronous exception here
+        -- since cleanup for asynchronous exceptions are handled otherwise(This
+        -- is because asynchronous exception could be thrown to main thread when
+        -- exectuing view or other things). Anyway it doesn't cause any harm.
+        --
         -- TODO: I'm not exactly sure about note 2. Maybe we need to adjust we to empty those MVar's...
         -- TODO: If there is only one Widget left, we could just return that widget with proper `mapView'
         -- This will reduce the ammount of thread needed.
-        running :: MVar (Int, v, Free (SuspendF v) a) -> [(v, ChildWidget a)] -> Widget v a
+        running ::
+            MVar (Either SomeException (Int, v, Free (SuspendF v) a)) ->
+            [(v, ChildWidget a)] ->
+            Widget v a
         running mvar child = do
             let cancelChilds = sequence_ [canceller | (_, Running canceller) <- child]
-            let canceller tid = cancelChilds *> killThread tid
-            (i, v0, w) <- effect' canceller $ takeMVar mvar -- (1)
-            r <- io $ step v0 w
-            case r of
-                Left a -> do
-                    io cancelChilds
-                    pure a
-                Right (v, blocking) -> do
-                    _view $ mconcat $ take i (map fst child) <> [v] <> drop (i + 1) (map fst child)
-                    c <- io $ forkBlockingIO mvar i v blocking
-                    let newChild = take i child <> [(v, c)] <> drop (i + 1) child
-                    if isTerminated c && all isTerminated (fmap snd newChild)
-                        then forever
-                        else running mvar newChild
+            let canceller tid doneVar = cancelChilds *> _defaultCanceller tid doneVar
+            r0 <- effect' canceller $ takeMVar mvar -- (1)
+            case r0 of
+                Left e -> do
+                    io $ cancelChilds *> Safe.throwIO e
+                Right (i, v0, w) -> do
+                    r1 <- io $ step v0 w `Safe.onException` cancelChilds -- (2)
+                    case r1 of
+                        Left a -> do
+                            io cancelChilds
+                            pure a
+                        Right (v, blocking) -> do
+                            _view $ mconcat $ take i (map fst child) <> [v] <> drop (i + 1) (map fst child)
+                            c <- io $ forkBlockingIO mvar i v blocking
+                            let newChild = take i child <> [(v, c)] <> drop (i + 1) child
+                            if isTerminated c && all isTerminated (fmap snd newChild)
+                                then forever
+                                else running mvar newChild
 
-        forkBlockingIO mvar index v = \case
-            BlockingIO c io ->
-                fmap (Running . c) $
-                    forkIO $ do
-                        a <- io
-                        putMVar mvar (index, v, a)
+        -- Only capture syncrhrouns exception, and put it in resultVar.
+        -- Asynchronous exception are throwned by concur main thread to stop
+        -- these, so it safe to just terminate a thread in such case.
+        --
+        -- Either case, doneVar should be filled when given io is termianted
+        -- (value or exception). `doneVar' will be used by the canceller to wait
+        -- of completion of cancelling. Even if `doneVar' is filled, its
+        -- paossible `putMVar resultVar' is blocking. So killThread first and
+        -- wait for doneVar to be filled afterwards.
+        --
+        -- Because of this requirement, we can't use `async' library.
+        --
+        forkBlockingIO resultVar index v = \case
+            BlockingIO canceller io -> do
+                doneVar <- newEmptyMVar
+                tid <- forkIO $ do
+                    r <- Safe.try $ io `Safe.finally` putMVar doneVar ()
+                    putMVar resultVar $ fmap (index,v,) r
+                pure $ Running (canceller tid doneVar)
             BlockingForever ->
                 pure Terminated
 
