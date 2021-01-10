@@ -27,6 +27,7 @@ module Concur.Core.Types (
     MonadCatch (..),
     -- re-export from resourct
     MonadResource(..),
+    ResourceT,
     runResourceT,
     allocate,
     release
