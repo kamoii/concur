@@ -34,11 +34,10 @@ import Control.Monad.Free (Free (..), hoistFree, liftF)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadTrans (lift), ReaderT, mapReaderT)
 import Control.MultiAlternative (MultiAlternative, never, orr)
-
-import qualified Concur.Core.Notify as N
 import Data.Bifunctor (Bifunctor (first))
 import Data.Maybe (fromMaybe)
-import Data.Functor (($>))
+
+import qualified Concur.Core.Notify as N
 
 {- | Functor for Widegt Free Monad
 
@@ -244,32 +243,11 @@ instance Monoid v => MultiAlternative (Widget v) where
     -- Addhing this pattarn-match doesn't change semantics.
     -- Instead of foerver-blocking StepBlock, we get Forever, which can be used to optimize.
     orr [] = _display mempty
-    -- Single child widget
-    -- Following commented out code is the previous implementation for case [w].
-    -- I don't think we need to interpret given Widget.
-    -- Just past it bellow should be enough and also most efficient.
-    -- But I'm not sure so I'll keep this code as comment.
+    -- Single child widget case.
+    -- orr [w] should be semanticaly same to w.
     orr [w] = w
-    -- Single child fast path without threads
-    -- orr [w] = go (unWidget w)
-    --   where
-    --     go widget = do
-    --         stepped <- io $ step mempty widget
-
-    --         case stepped of
-    --             Left a -> pure a
-    --             Right (v, Nothing) -> _view v >> forever
-    --             Right (v, Just await) -> do
-    --                 _view v
-    --                 next <- effect await
-    --                 go next
-
-    -- General threaded case
-    --
-    -- (1)
-    -- We will always update view before executing block ios.
-    -- If a child widget didn't raise any view, `mempty' will be used.
-    orr ws = firstStep ws
+    -- General case.
+    orr ws_ = firstStep ws_
       where
         firstStep :: [Widget v a] -> Widget v a
         firstStep ws0 = do
@@ -278,7 +256,9 @@ instance Monoid v => MultiAlternative (Widget v) where
                 Left a ->
                     pure a
                 Right ws'' -> do
-                    let ws = fmap (first (fromMaybe mempty)) ws'' -- (1)
+                    -- We will always update view before executing block ios.
+                    -- If a child widget didn't raise any view, `mempty' will be used.
+                    let ws = fmap (first (fromMaybe mempty)) ws''
                     _view $ mconcat $ map fst ws
                     if all isBlockingForever (fmap snd ws)
                         then forever
@@ -359,8 +339,6 @@ instance Monoid v => MultiAlternative (Widget v) where
             [(v, ChildWidget a)] ->
             Widget v a
         running mvar child = do
-            let cancelChilds = sequence_ [canceller | (_, Running canceller) <- child]
-            let canceller tid doneVar = cancelChilds *> _defaultCanceller tid doneVar
             r0 <- effect' canceller $ takeMVar mvar -- (1)
             case r0 of
                 Left e -> do
@@ -384,6 +362,9 @@ instance Monoid v => MultiAlternative (Widget v) where
                             if isTerminated c && all isTerminated (fmap snd newChild)
                                 then forever
                                 else running mvar newChild
+          where
+            cancelChilds = sequence_ [c | (_, Running c) <- child]
+            canceller tid doneVar = cancelChilds *> _defaultCanceller tid doneVar
 
         -- Only capture syncrhrouns exception, and put it in resultVar.
         -- Asynchronous exception are throwned by concur main thread to stop
@@ -398,10 +379,10 @@ instance Monoid v => MultiAlternative (Widget v) where
         -- Because of this requirement, we can't use `async' library.
         --
         forkBlockingIO resultVar index v = \case
-            BlockingIO canceller io -> do
+            BlockingIO canceller blockIO -> do
                 doneVar <- newEmptyMVar
                 tid <- forkIO $ do
-                    r <- Safe.try $ io `Safe.finally` putMVar doneVar ()
+                    r <- Safe.try $ blockIO `Safe.finally` putMVar doneVar ()
                     putMVar resultVar $ fmap (index,v,) r
                 pure $ Running (canceller tid doneVar)
             BlockingForever ->
