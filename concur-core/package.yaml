@@ -20,7 +20,8 @@ dependencies:
 - free >=4.12
 - natural-transformation >=0.4
 - exceptions >=0.10
-- safe-exceptions >=0.1.7
+- unliftio >=0.2
+- resourcet >=1.2
 library:
   source-dirs: src
   exposed-modules:

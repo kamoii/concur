@@ -26,13 +26,13 @@ module Concur.Core.Types (
 
 import Control.Applicative (Alternative, empty, (<|>))
 import Control.Concurrent (MVar, ThreadId, forkIO, killThread, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception.Safe (Exception, SomeException)
-import Control.Exception.Safe as Safe (finally, onException, throwIO, try)
 import Control.Monad (MonadPlus (..), forM)
+import UnliftIO.Exception as Safe
 import Control.Monad.Catch (MonadCatch (..), MonadThrow (..))
 import Control.Monad.Free (Free (..), hoistFree, liftF)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadTrans (lift), ReaderT, mapReaderT)
+import Control.Monad.Trans.Resource (ResourceT)
 import Control.MultiAlternative (MultiAlternative, never, orr)
 import Data.Bifunctor (Bifunctor (first))
 import Data.Maybe (fromMaybe)
@@ -48,11 +48,17 @@ import qualified Concur.Core.Notify as N
  `Forever' constructor should be semantically same as `StepBlock (forever (threadDelay maxBound))'.
  It gives us more information than opaque StepBlock constructor, making some optimization possible.
  It makes interpreters possible to terminate.
+
+
+ TODO: Add note about ResourceT inside `StepIO (ResourceT IO next)'
+
+ Main purpose is to prevent thread-leaks when main thread was interupted by
+ asynchronous exception. Also user can use MonadResource methods.
 -}
 data SuspendF v next
     = StepView v next
     | StepBlock Canceller (IO next)
-    | StepIO (IO next)
+    | StepIO (ResourceT IO next)
     | Forever
 
 type Canceller = ThreadId -> MVar () -> IO ()
@@ -105,7 +111,10 @@ effect' c a = Widget $ liftF $ StepBlock c a
     If catched by `catch`, it will stop there. Otherwise, main thread of concur would raise exception.
 -}
 io :: IO a -> Widget v a
-io a = Widget $ liftF $ StepIO a
+io = Widget . liftF . StepIO . liftIO
+
+io' :: ResourceT IO a -> Widget v a
+io' = Widget . liftF . StepIO
 
 {- | Note about synchronous exception
 
@@ -172,7 +181,7 @@ _catch (Widget w) handler = step w
   where
     step :: Free (SuspendF v) a -> Widget v a
     step (Free (StepView v next)) = _view v *> step next
-    step (Free (StepIO a)) = io (Safe.try @_ @e a) >>= either handler step
+    step (Free (StepIO a)) = io' (Safe.try @_ @e a) >>= either handler step
     step (Free (StepBlock c a)) = effect' c (Safe.try @_ @e a) >>= either handler step
     step (Free Forever) = forever
     step (Pure a) = pure a
@@ -251,7 +260,7 @@ instance Monoid v => MultiAlternative (Widget v) where
       where
         firstStep :: [Widget v a] -> Widget v a
         firstStep ws0 = do
-            ws' <- io $ traverse (step mempty . unWidget) ws0
+            ws' <- io' $ traverse (step mempty . unWidget) ws0
             case sequence ws' of
                 Left a ->
                     pure a
@@ -344,7 +353,7 @@ instance Monoid v => MultiAlternative (Widget v) where
                 Left e -> do
                     io $ cancelChilds *> Safe.throwIO e
                 Right (i, v0, w) -> do
-                    r1 <- io $ step Nothing w `Safe.onException` cancelChilds -- (2)
+                    r1 <- io' $ step Nothing w `Safe.onException` liftIO cancelChilds -- (2)
                     case r1 of
                         Left a -> do
                             io cancelChilds
@@ -390,7 +399,7 @@ instance Monoid v => MultiAlternative (Widget v) where
 
         -- Import thing is that we evaluate `StepIO's effect.
         -- Result v is the last View before Blocking(StepBlock, StepForever).
-        step :: Maybe v -> Free (SuspendF v) a -> IO (Either a (Maybe v, BlockingIO v a))
+        step :: Maybe v -> Free (SuspendF v) a -> ResourceT IO (Either a (Maybe v, BlockingIO v a))
         step _ (Free (StepView v next)) = step (Just v) next
         step v (Free (StepIO a)) = a >>= step v
         step v (Free (StepBlock c a)) = pure $ Right (v, BlockingIO c a)

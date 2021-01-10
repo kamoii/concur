@@ -6,6 +6,8 @@ import Control.Concurrent (threadDelay)
 import Control.Exception (Exception, throwIO, try)
 import Control.Monad.Catch (MonadCatch (catch), MonadThrow (throwM))
 import Control.Monad.Free (Free (Free, Pure))
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans.Resource (ResourceT, runResourceT)
 import Data.Functor (($>))
 import qualified Data.IORef as IORef
 import Data.Void (Void)
@@ -19,12 +21,12 @@ data WidgetOp v a
     deriving (Show, Eq)
 
 runWidget :: Widget String a -> IO [WidgetOp String a]
-runWidget (Widget w) = go w
+runWidget (Widget w) = runResourceT $ go w
   where
-    go :: Free (SuspendF v) a -> IO [WidgetOp v a]
+    go :: Free (SuspendF v) a -> ResourceT IO [WidgetOp v a]
     go (Free (StepView v next)) = (WOView v :) <$> go next
     go (Free (StepIO io)) = io >>= go
-    go (Free (StepBlock _ io)) = io >>= go
+    go (Free (StepBlock _ io)) = liftIO io >>= go
     go (Free Forever) = pure [WOForever]
     go (Pure a) = pure [WODone a]
 
