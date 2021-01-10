@@ -227,3 +227,4 @@ testException =
                 let w1 = waitFor2 *> liftSafeBlockingIO (throwIO TestException2) $> (2 :: Int)
                 catch @_ @TestException (w0 <|> w1) (\_ -> pure 3)
         ops @?= [WOView "", WODone 3]
+

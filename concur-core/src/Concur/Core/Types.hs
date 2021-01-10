@@ -22,6 +22,14 @@ module Concur.Core.Types (
     MonadUnsafeBlockingIO (..),
     MonadSafeBlockingIO (..),
     MonadView (..),
+    -- re-export from exceptions
+    MonadThrow (..),
+    MonadCatch (..),
+    -- re-export from resourct
+    MonadResource(..),
+    runResourceT,
+    allocate,
+    release
 ) where
 
 import Control.Applicative (Alternative, empty, (<|>))
@@ -32,7 +40,7 @@ import Control.Monad.Catch (MonadCatch (..), MonadThrow (..))
 import Control.Monad.Free (Free (..), hoistFree, liftF)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadTrans (lift), ReaderT, mapReaderT)
-import Control.Monad.Trans.Resource (ResourceT)
+import Control.Monad.Trans.Resource (ReleaseKey, release, allocate, runResourceT, MonadResource(..), ResourceT)
 import Control.MultiAlternative (MultiAlternative, never, orr)
 import Data.Bifunctor (Bifunctor (first))
 import Data.Maybe (fromMaybe)
@@ -219,6 +227,9 @@ remoteWidget d f = do
 instance MonadIO (Widget v) where
     liftIO = effect
 
+instance MonadResource (Widget v) where
+    liftResourceT = io'
+
 instance MonadThrow (Widget v) where
     throwM = _throwM
 
@@ -239,7 +250,7 @@ instance Monoid v => Alternative (Widget v) where
 -- To avoid Either-blindness and Maybe-blindness,
 -- define data types solely for implementating orr.
 data ChildWidget a
-    = Running (IO ())
+    = Running ReleaseKey
     | Terminated
 
 data BlockingIO v a
@@ -278,7 +289,7 @@ instance Monoid v => MultiAlternative (Widget v) where
         running0 :: [(v, BlockingIO v a)] -> Widget v a
         running0 ws = do
             mvar <- io newEmptyMVar
-            child <- io $ forM (zip [0 ..] ws) $ \(i, (v, b)) -> (v,) <$> forkBlockingIO mvar i v b
+            child <- io' $ forM (zip [0 ..] ws) $ \(i, (v, b)) -> (v,) <$> forkBlockingIO mvar i v b
             running mvar child
 
         -- Wait for one of child effect thread to terminate and puts its widget
@@ -366,13 +377,13 @@ instance Monoid v => MultiAlternative (Widget v) where
                                     _view $ mconcat $ take i (map fst child) <> [v] <> drop (i + 1) (map fst child)
                                     pure v
                                 Nothing -> pure v0
-                            c <- io $ forkBlockingIO mvar i v blocking
+                            c <- io' $ forkBlockingIO mvar i v blocking
                             let newChild = take i child <> [(v, c)] <> drop (i + 1) child
                             if isTerminated c && all isTerminated (fmap snd newChild)
                                 then forever
                                 else running mvar newChild
           where
-            cancelChilds = sequence_ [c | (_, Running c) <- child]
+            cancelChilds = sequence_ [release rkey | (_, Running rkey) <- child]
             canceller tid doneVar = cancelChilds *> _defaultCanceller tid doneVar
 
         -- Only capture syncrhrouns exception, and put it in resultVar.
@@ -387,13 +398,16 @@ instance Monoid v => MultiAlternative (Widget v) where
         --
         -- Because of this requirement, we can't use `async' library.
         --
-        forkBlockingIO resultVar index v = \case
+        forkBlockingIO resultVar index view' = \case
             BlockingIO canceller blockIO -> do
-                doneVar <- newEmptyMVar
-                tid <- forkIO $ do
-                    r <- Safe.try $ blockIO `Safe.finally` putMVar doneVar ()
-                    putMVar resultVar $ fmap (index,v,) r
-                pure $ Running (canceller tid doneVar)
+                (releaseKey, _) <- allocate ( do
+                    doneVar <- newEmptyMVar
+                    tid <- forkIO $ do
+                        r <- Safe.try $ blockIO `Safe.finally` putMVar doneVar ()
+                        putMVar resultVar $ fmap (index,view',) r
+                    pure (tid, doneVar))
+                    (uncurry canceller)
+                pure $ Running releaseKey
             BlockingForever ->
                 pure Terminated
 
