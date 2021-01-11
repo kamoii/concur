@@ -6,7 +6,7 @@ module Control.MultiAlternative where
 import Control.Applicative (Alternative, empty, (<|>))
 import Control.Monad.Reader (MonadReader (ask), MonadTrans (lift), ReaderT (ReaderT, runReaderT))
 
-class MultiAlternative f where
+class Alternative f => MultiAlternative f where
     never :: f a
     orr :: [f a] -> f a
 
