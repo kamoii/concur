@@ -4,6 +4,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TupleSections #-}
@@ -18,6 +19,7 @@ module Concur.Core.Types (
     awaitViewAction,
     MultiAlternative (..),
     andd,
+    andd',
     remoteWidget,
     unsafeBlockingIO,
     MonadUnsafeBlockingIO (..),
@@ -48,7 +50,6 @@ import Data.Maybe (fromMaybe)
 import UnliftIO.Exception as Safe
 
 import qualified Concur.Core.Notify as N
-import Data.Function ((&))
 
 {- | Functor for Widegt Free Monad
 
@@ -432,8 +433,33 @@ instance Monoid v => MultiAlternative (Widget v) where
         isBlockingForever (BlockingIO _ _) = False
         isBlockingForever BlockingForever = True
 
--- | Wait for all widgets to terminate with a value.
--- Widgets that termianted early will udpate its view with mempty and wait for other widgets.
+{- | Wait for all widgets to terminate with a value.
+ Widgets that termianted early will udpate its view with `waiting' and wait for other widgets.
+-}
+andd' ::
+    ( MonadUnsafeBlockingIO m
+    , MonadSafeBlockingIO m
+    , MultiAlternative m
+    ) =>
+    (forall b. a -> m b) ->
+    [m a] ->
+    m [a]
+andd' _ [] = pure []
+andd' _ [w] = (: []) <$> w
+andd' waiting ws0 = do
+    ws <- liftUnsafeBlockingIO $ traverse (\w -> (w,) <$> newEmptyMVar) ws0
+    orr
+        [ orr $
+            map
+                ( \(w, var) -> do
+                    a <- w
+                    liftUnsafeBlockingIO $ putMVar var a
+                    waiting a
+                )
+                ws
+        , liftSafeBlockingIO $ traverse (readMVar . snd) ws
+        ]
+
 andd ::
     ( MonadUnsafeBlockingIO m
     , MonadSafeBlockingIO m
@@ -443,20 +469,7 @@ andd ::
     ) =>
     [m a] ->
     m [a]
-andd [] = pure []
-andd [w] = (: []) <$> w
-andd ws0 = do
-    ws <- liftUnsafeBlockingIO $ traverse (\w -> (w,) <$> newEmptyMVar) ws0
-    orr
-        [ orr $
-            map
-                ( \(w, var) -> do
-                    liftUnsafeBlockingIO . putMVar var =<< w
-                    display mempty
-                )
-                ws
-        , liftSafeBlockingIO $ traverse (readMVar . snd) ws
-        ]
+andd = andd' (const $ display mempty)
 
 -- The default instance derives from Alternative
 instance Monoid v => MonadPlus (Widget v)
