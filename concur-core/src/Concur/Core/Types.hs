@@ -12,11 +12,12 @@
 
 module Concur.Core.Types (
     Widget (..),
+    SuspendF (..),
     continue,
     wrapView,
-    SuspendF (..),
     awaitViewAction,
     MultiAlternative (..),
+    andd,
     remoteWidget,
     unsafeBlockingIO,
     MonadUnsafeBlockingIO (..),
@@ -26,27 +27,28 @@ module Concur.Core.Types (
     MonadThrow (..),
     MonadCatch (..),
     -- re-export from resourct
-    MonadResource(..),
+    MonadResource (..),
     ResourceT,
     runResourceT,
     allocate,
-    release
+    release,
 ) where
 
 import Control.Applicative (Alternative, empty, (<|>))
-import Control.Concurrent (MVar, ThreadId, forkIO, killThread, newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent (MVar, ThreadId, forkIO, killThread, newEmptyMVar, putMVar, readMVar, takeMVar)
 import Control.Monad (MonadPlus (..), forM)
-import UnliftIO.Exception as Safe
 import Control.Monad.Catch (MonadCatch (..), MonadThrow (..))
 import Control.Monad.Free (Free (..), hoistFree, liftF)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadTrans (lift), ReaderT, mapReaderT)
-import Control.Monad.Trans.Resource (ReleaseKey, release, allocate, runResourceT, MonadResource(..), ResourceT)
+import Control.Monad.Trans.Resource (MonadResource (..), ReleaseKey, ResourceT, allocate, release, runResourceT)
 import Control.MultiAlternative (MultiAlternative, never, orr)
 import Data.Bifunctor (Bifunctor (first))
 import Data.Maybe (fromMaybe)
+import UnliftIO.Exception as Safe
 
 import qualified Concur.Core.Notify as N
+import Data.Function ((&))
 
 {- | Functor for Widegt Free Monad
 
@@ -57,7 +59,6 @@ import qualified Concur.Core.Notify as N
  `Forever' constructor should be semantically same as `StepBlock (forever (threadDelay maxBound))'.
  It gives us more information than opaque StepBlock constructor, making some optimization possible.
  It makes interpreters possible to terminate.
-
 
  TODO: Add note about ResourceT inside `StepIO (ResourceT IO next)'
 
@@ -373,6 +374,7 @@ instance Monoid v => MultiAlternative (Widget v) where
                         Right (mv, blocking) -> do
                             -- Only update view if widget yeild any view before we reach the next blocking.
                             -- There is no meaning updating view with the previous view (v0).
+                            -- TODO: I'm not exactly sure about this case. Maybe there is case where we must to update view.
                             v <- case mv of
                                 Just v -> do
                                     _view $ mconcat $ take i (map fst child) <> [v] <> drop (i + 1) (map fst child)
@@ -401,13 +403,16 @@ instance Monoid v => MultiAlternative (Widget v) where
         --
         forkBlockingIO resultVar index view' = \case
             BlockingIO canceller blockIO -> do
-                (releaseKey, _) <- allocate ( do
-                    doneVar <- newEmptyMVar
-                    tid <- forkIO $ do
-                        r <- Safe.try $ blockIO `Safe.finally` putMVar doneVar ()
-                        putMVar resultVar $ fmap (index,view',) r
-                    pure (tid, doneVar))
-                    (uncurry canceller)
+                (releaseKey, _) <-
+                    allocate
+                        ( do
+                            doneVar <- newEmptyMVar
+                            tid <- forkIO $ do
+                                r <- Safe.try $ blockIO `Safe.finally` putMVar doneVar ()
+                                putMVar resultVar $ fmap (index,view',) r
+                            pure (tid, doneVar)
+                        )
+                        (uncurry canceller)
                 pure $ Running releaseKey
             BlockingForever ->
                 pure Terminated
@@ -426,6 +431,32 @@ instance Monoid v => MultiAlternative (Widget v) where
 
         isBlockingForever (BlockingIO _ _) = False
         isBlockingForever BlockingForever = True
+
+-- | Wait for all widgets to terminate with a value.
+-- Widgets that termianted early will udpate its view with mempty and wait for other widgets.
+andd ::
+    ( MonadUnsafeBlockingIO m
+    , MonadSafeBlockingIO m
+    , MultiAlternative m
+    , MonadView v m
+    , Monoid v
+    ) =>
+    [m a] ->
+    m [a]
+andd [] = pure []
+andd [w] = (: []) <$> w
+andd ws0 = do
+    ws <- liftUnsafeBlockingIO $ traverse (\w -> (w,) <$> newEmptyMVar) ws0
+    orr
+        [ orr $
+            map
+                ( \(w, var) -> do
+                    liftUnsafeBlockingIO . putMVar var =<< w
+                    display mempty
+                )
+                ws
+        , liftSafeBlockingIO $ traverse (readMVar . snd) ws
+        ]
 
 -- The default instance derives from Alternative
 instance Monoid v => MonadPlus (Widget v)
@@ -459,19 +490,19 @@ instance MonadSafeBlockingIO m => MonadSafeBlockingIO (ReaderT r m) where
 -- | MonadView
 
 -- TODO: Maybe `view' shouldn't be exposed to user. Only `display'
--- `view' might encorouage imprative style of coding.
+-- `view' might encorouage imprative style coding.
 class Monad m => MonadView v m | m -> v where
-    view :: v -> m ()
+    -- view :: v -> m ()
     display :: v -> m a
     mapView :: (v -> v) -> m a -> m a
 
 instance MonadView v (Widget v) where
-    view = _view
+    -- view = _view
     display = _display
     mapView = _mapView
 
 instance MonadView v m => MonadView v (ReaderT r m) where
-    view = lift . view
+    -- view = lift . view
     display = lift . display
     mapView f = mapReaderT (mapView f)
 
