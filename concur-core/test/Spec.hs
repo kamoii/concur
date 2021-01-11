@@ -35,7 +35,7 @@ main =
     defaultMain $
         testGroup
             "Widget"
-            [ testDisplay
+            [ testView
             , testIO
             , testAlternative
             , testException
@@ -145,10 +145,27 @@ testIO = testCase "io" $ do
     ops1 <- runWidget $ liftUnsafeBlockingIO (threadDelay 10)
     ops1 @?= [WODone ()]
 
+testView :: TestTree
+testView =
+    testGroup
+        "view"
+        [ testDisplay
+        , testViewUpdate
+        ]
+
 testDisplay :: TestTree
 testDisplay = testCase "display" $ do
-    ops <- runWidget (display "foo" :: Widget String Void)
-    ops @?= [WOView "foo", WOForever]
+    ops <- runWidget (display "a" :: Widget String Void)
+    ops @?= [WOView "a", WOForever]
+
+-- Current view must be determined by running widgets only.
+-- For bellow case, while (1) is running, the whole view should be "", not "a".
+testViewUpdate :: TestTree
+testViewUpdate = testCase "view update" $ do
+    ops <- runWidget $ do
+        display "a" <|> waitFor t1
+        waitFor t1 -- (1)
+    ops @?= [WOView "a", WOView "", WODone ()]
 
 data TestException = TestException
     deriving (Show, Eq)
@@ -227,4 +244,3 @@ testException =
                 let w1 = waitFor2 *> liftSafeBlockingIO (throwIO TestException2) $> (2 :: Int)
                 catch @_ @TestException (w0 <|> w1) (\_ -> pure 3)
         ops @?= [WOView "", WODone 3]
-
