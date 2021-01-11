@@ -14,9 +14,10 @@
 module Concur.Core.Types (
     Widget (..),
     SuspendF (..),
+    WidgetStream (..),
+    widgetStream,
     continue,
     wrapView,
-    awaitViewAction,
     MultiAlternative (..),
     andd,
     andd',
@@ -45,11 +46,7 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Reader (MonadTrans (lift), ReaderT, mapReaderT)
 import Control.Monad.Trans.Resource (MonadResource (..), ReleaseKey, ResourceT, allocate, release, runResourceT)
 import Control.MultiAlternative (MultiAlternative, never, orr)
-import Data.Bifunctor (Bifunctor (first))
-import Data.Maybe (fromMaybe)
 import UnliftIO.Exception as Safe
-
-import qualified Concur.Core.Notify as N
 
 {- | Functor for Widegt Free Monad
 
@@ -67,20 +64,35 @@ import qualified Concur.Core.Notify as N
  asynchronous exception. Also user can use MonadResource methods.
 -}
 data SuspendF v next
-    = StepView v next
-    | StepBlock Canceller (IO next)
+    = StepBlock v Canceller (IO next)
+    | StepBlockForever v
     | StepIO (ResourceT IO next)
-    | Forever
 
-type Canceller = ThreadId -> MVar () -> IO ()
+type Canceller = (ThreadId, MVar ()) -> IO ()
 
 deriving instance Functor (SuspendF v)
 
 newtype Widget v a = Widget {unWidget :: Free (SuspendF v) a}
     deriving (Functor, Applicative, Monad)
 
-_view :: v -> Widget v ()
-_view v = Widget $ liftF $ StepView v ()
+{- | top-level interpreter to make stream.
+
+ For most of the cases this interpreter should be enough.
+ Don't depend on internal data types, like SuspendF, if you don't need to.
+-}
+data WidgetStream v a
+    = WidgetView v (ResourceT IO (WidgetStream v a))
+    | WidgetResult a
+    | WidgetTerminate
+
+widgetStream :: Widget v a -> ResourceT IO (WidgetStream v a)
+widgetStream (Widget w) = go w
+  where
+    go :: Free (SuspendF v) a -> ResourceT IO (WidgetStream v a)
+    go (Free (StepIO io)) = io >>= go
+    go (Free (StepBlock v _ io)) = pure $ WidgetView v (liftIO io >>= go)
+    go (Free (StepBlockForever v)) = pure $ WidgetView v (pure WidgetTerminate)
+    go (Pure a) = pure $ WidgetResult a
 
 {- | IO witch will exectued concurrently
 
@@ -94,18 +106,18 @@ _view v = Widget $ liftF $ StepView v ()
     Be aware that not all excpetion is handled (see the note bellow).
     If catched by `catch`, it will stop there. Otherwise, main thread of concur would raise exception.
 -}
-effect :: IO a -> Widget v a
-effect = effect' _defaultCanceller
+effect :: Monoid v => IO a -> Widget v a
+effect = effect' mempty _defaultCanceller
 
 -- Its important `killThread' even if the doneVar is already fill.
 -- See implemnatation note for `orr'.
 _defaultCanceller :: Canceller
-_defaultCanceller tid doneVar = do
+_defaultCanceller (tid, doneVar) = do
     killThread tid
     takeMVar doneVar
 
-effect' :: Canceller -> IO a -> Widget v a
-effect' c a = Widget $ liftF $ StepBlock c a
+effect' :: v -> Canceller -> IO a -> Widget v a
+effect' v c a = Widget $ liftF $ StepBlock v c a
 
 {- | IO witch will executed synchronously
 
@@ -154,24 +166,23 @@ io' = Widget . liftF . StepIO
  2) All exception raised inside `io' will be propagated.
     Since `io' is always executed by main thread.
 -}
-forever :: Widget v a
-forever = Widget $ liftF Forever
+forever' :: v -> Widget v a
+forever' = Widget . liftF . StepBlockForever
 
 continue :: SuspendF v a -> Widget v a
 continue = Widget . liftF
 
 _display :: v -> Widget v a
-_display v = _view v >> forever
+_display = forever'
 
 -- Change the view of a Widget
 _mapView :: (u -> v) -> Widget u a -> Widget v a
 _mapView f (Widget w) = Widget $ go w
   where
     go = hoistFree g
-    g (StepView v next) = StepView (f v) next
     g (StepIO a) = StepIO a
-    g (StepBlock c a) = StepBlock c a
-    g Forever = Forever
+    g (StepBlock v c a) = StepBlock (f v) c a
+    g (StepBlockForever v) = StepBlockForever (f v)
 
 -- Generic widget view wrapper
 -- DEPRECATE: Use mapView (pure . f) directly
@@ -191,10 +202,9 @@ _catch :: forall a e v. Exception e => Widget v a -> (e -> Widget v a) -> Widget
 _catch (Widget w) handler = step w
   where
     step :: Free (SuspendF v) a -> Widget v a
-    step (Free (StepView v next)) = _view v *> step next
     step (Free (StepIO a)) = io' (Safe.try @_ @e a) >>= either handler step
-    step (Free (StepBlock c a)) = effect' c (Safe.try @_ @e a) >>= either handler step
-    step (Free Forever) = forever
+    step (Free (StepBlock v c a)) = effect' v c (Safe.try @_ @e a) >>= either handler step
+    step (Free (StepBlockForever v)) = forever' v
     step (Pure a) = pure a
 
 {- | IMPORTANT: Blocking IO is dangerous as it can block the entire UI from updating.
@@ -202,13 +212,6 @@ _catch (Widget w) handler = step w
 -}
 unsafeBlockingIO :: IO a -> Widget v a
 unsafeBlockingIO = io
-
--- This is a safe use for blockingIO, and is exported
-awaitViewAction :: (N.Notify a -> v) -> Widget v a
-awaitViewAction f = do
-    n <- io N.newNotify
-    _view (f n)
-    effect $ N.await n
 
 -- Make a Widget, which can be pushed to remotely
 remoteWidget ::
@@ -227,10 +230,10 @@ remoteWidget d f = do
     proxy var = liftUnsafeBlockingIO . putMVar var
     wid var ui = orr [Left <$> ui, Right <$> liftSafeBlockingIO (takeMVar var)] >>= either return (wid var . f)
 
-instance MonadIO (Widget v) where
+instance Monoid v => MonadIO (Widget v) where
     liftIO = effect
 
-instance MonadResource (Widget v) where
+instance Monoid v => MonadResource (Widget v) where
     liftResourceT = io'
 
 instance MonadThrow (Widget v) where
@@ -257,8 +260,8 @@ data ChildWidget a
     | Terminated
 
 data BlockingIO v a
-    = BlockingIO Canceller (IO (Free (SuspendF v) a))
-    | BlockingForever
+    = BlockingIO v Canceller (IO (Free (SuspendF v) a))
+    | BlockingForever v
 
 instance Monoid v => MultiAlternative (Widget v) where
     never = _display mempty
@@ -274,25 +277,21 @@ instance Monoid v => MultiAlternative (Widget v) where
       where
         firstStep :: [Widget v a] -> Widget v a
         firstStep ws0 = do
-            ws' <- io' $ traverse (step mempty . unWidget) ws0
+            ws' <- io' $ traverse (step . unWidget) ws0
             case sequence ws' of
                 Left a ->
                     pure a
-                Right ws'' -> do
-                    -- We will always update view before executing block ios.
-                    -- If a child widget didn't raise any view, `mempty' will be used.
-                    let ws = fmap (first (fromMaybe mempty)) ws''
-                    _view $ mconcat $ map fst ws
-                    if all isBlockingForever (fmap snd ws)
-                        then forever
+                Right ws -> do
+                    if all isBlockingForever ws
+                        then forever' (mconcat $ map blockingIOView ws)
                         else running0 ws
 
         -- There was atleast one BlockingIO.
         -- Running all BlockingIO's
-        running0 :: [(v, BlockingIO v a)] -> Widget v a
+        running0 :: [BlockingIO v a] -> Widget v a
         running0 ws = do
             mvar <- io newEmptyMVar
-            child <- io' $ forM (zip [0 ..] ws) $ \(i, (v, b)) -> (v,) <$> forkBlockingIO mvar i v b
+            child <- io' $ forM (zip [0 ..] ws) $ uncurry (forkBlockingIO mvar)
             running mvar child
 
         -- Wait for one of child effect thread to terminate and puts its widget
@@ -358,37 +357,29 @@ instance Monoid v => MultiAlternative (Widget v) where
         -- TODO: If there is only one Widget left, we could just return that widget with proper `mapView'
         -- This will reduce the ammount of thread needed.
         running ::
-            MVar (Either SomeException (Int, v, Free (SuspendF v) a)) ->
+            MVar (Either SomeException (Int, Free (SuspendF v) a)) ->
             [(v, ChildWidget a)] ->
             Widget v a
         running mvar child = do
-            r0 <- effect' canceller $ takeMVar mvar -- (1)
+            r0 <- effect' (mconcat $ map fst child) canceller $ takeMVar mvar -- (1)
             case r0 of
                 Left e -> do
                     io $ cancelChilds *> Safe.throwIO e
-                Right (i, v0, w) -> do
-                    r1 <- io' $ step Nothing w `Safe.onException` liftIO cancelChilds -- (2)
+                Right (i, w) -> do
+                    r1 <- io' $ step w `Safe.onException` liftIO cancelChilds -- (2)
                     case r1 of
                         Left a -> do
                             io cancelChilds
                             pure a
-                        Right (mv, blocking) -> do
-                            -- Only update view if widget yeild any view before we reach the next blocking.
-                            -- There is no meaning updating view with the previous view (v0).
-                            -- TODO: I'm not exactly sure about this case. Maybe there is case where we must to update view.
-                            v <- case mv of
-                                Just v -> do
-                                    _view $ mconcat $ take i (map fst child) <> [v] <> drop (i + 1) (map fst child)
-                                    pure v
-                                Nothing -> pure v0
-                            c <- io' $ forkBlockingIO mvar i v blocking
+                        Right blocking -> do
+                            (v, c) <- io' $ forkBlockingIO mvar i blocking
                             let newChild = take i child <> [(v, c)] <> drop (i + 1) child
                             if isTerminated c && all isTerminated (fmap snd newChild)
-                                then forever
+                                then forever' (mconcat $ map fst newChild)
                                 else running mvar newChild
           where
             cancelChilds = sequence_ [release rkey | (_, Running rkey) <- child]
-            canceller tid doneVar = cancelChilds *> _defaultCanceller tid doneVar
+            canceller v = cancelChilds *> _defaultCanceller v
 
         -- Only capture syncrhrouns exception, and put it in resultVar.
         -- Asynchronous exception are throwned by concur main thread to stop
@@ -402,36 +393,38 @@ instance Monoid v => MultiAlternative (Widget v) where
         --
         -- Because of this requirement, we can't use `async' library.
         --
-        forkBlockingIO resultVar index view' = \case
-            BlockingIO canceller blockIO -> do
+        forkBlockingIO resultVar index = \case
+            BlockingIO view canceller blockIO -> do
                 (releaseKey, _) <-
                     allocate
                         ( do
                             doneVar <- newEmptyMVar
                             tid <- forkIO $ do
                                 r <- Safe.try $ blockIO `Safe.finally` putMVar doneVar ()
-                                putMVar resultVar $ fmap (index,view',) r
+                                putMVar resultVar $ fmap (index,) r
                             pure (tid, doneVar)
                         )
-                        (uncurry canceller)
-                pure $ Running releaseKey
-            BlockingForever ->
-                pure Terminated
+                        canceller
+                pure (view, Running releaseKey)
+            BlockingForever view ->
+                pure (view, Terminated)
 
         -- Import thing is that we evaluate `StepIO's effect.
         -- Result v is the last View before Blocking(StepBlock, StepForever).
-        step :: Maybe v -> Free (SuspendF v) a -> ResourceT IO (Either a (Maybe v, BlockingIO v a))
-        step _ (Free (StepView v next)) = step (Just v) next
-        step v (Free (StepIO a)) = a >>= step v
-        step v (Free (StepBlock c a)) = pure $ Right (v, BlockingIO c a)
-        step v (Free Forever) = pure $ Right (v, BlockingForever)
-        step _ (Pure a) = pure $ Left a
+        step :: Free (SuspendF v) a -> ResourceT IO (Either a (BlockingIO v a))
+        step (Free (StepIO a)) = a >>= step
+        step (Free (StepBlock v c a)) = pure $ Right (BlockingIO v c a)
+        step (Free (StepBlockForever v)) = pure $ Right (BlockingForever v)
+        step (Pure a) = pure $ Left a
 
         isTerminated Terminated = True
         isTerminated _ = False
 
-        isBlockingForever (BlockingIO _ _) = False
-        isBlockingForever BlockingForever = True
+        isBlockingForever BlockingIO{} = False
+        isBlockingForever BlockingForever{} = True
+
+        blockingIOView (BlockingIO v _ _) = v
+        blockingIOView (BlockingForever v) = v
 
 {- | Wait for all widgets to terminate with a value.
  Widgets that termianted early will udpate its view with `waiting' and wait for other widgets.
@@ -491,7 +484,7 @@ instance MonadUnsafeBlockingIO m => MonadUnsafeBlockingIO (ReaderT r m) where
 class Monad m => MonadSafeBlockingIO m where
     liftSafeBlockingIO :: IO a -> m a
 
-instance MonadSafeBlockingIO (Widget v) where
+instance Monoid v => MonadSafeBlockingIO (Widget v) where
     liftSafeBlockingIO = effect
 
 instance MonadSafeBlockingIO m => MonadSafeBlockingIO (ReaderT r m) where

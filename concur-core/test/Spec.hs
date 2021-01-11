@@ -4,10 +4,6 @@ import Concur.Core
 import Control.Applicative (Alternative ((<|>)))
 import Control.Concurrent (threadDelay)
 import Control.Exception (Exception, throwIO, try)
-import Control.Monad.Catch (MonadCatch (catch), MonadThrow (throwM))
-import Control.Monad.Free (Free (Free, Pure))
-import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Trans.Resource (ResourceT, runResourceT)
 import Data.Functor (($>))
 import qualified Data.IORef as IORef
 import Data.Void (Void)
@@ -21,14 +17,12 @@ data WidgetOp v a
     deriving (Show, Eq)
 
 runWidget :: Widget String a -> IO [WidgetOp String a]
-runWidget (Widget w) = runResourceT $ go w
+runWidget w = runResourceT $ widgetStream w >>= go
   where
-    go :: Free (SuspendF v) a -> ResourceT IO [WidgetOp v a]
-    go (Free (StepView v next)) = (WOView v :) <$> go next
-    go (Free (StepIO io)) = io >>= go
-    go (Free (StepBlock _ io)) = liftIO io >>= go
-    go (Free Forever) = pure [WOForever]
-    go (Pure a) = pure [WODone a]
+    go :: WidgetStream v a -> ResourceT IO [WidgetOp v a]
+    go (WidgetView v s) = s >>= fmap (WOView v :) . go
+    go (WidgetResult a) = pure [WODone a]
+    go WidgetTerminate = pure [WOForever]
 
 main :: IO ()
 main =
@@ -141,7 +135,7 @@ waitForever = waitFor maxBound *> waitForever
 testIO :: TestTree
 testIO = testCase "io" $ do
     ops0 <- runWidget $ liftSafeBlockingIO (threadDelay 10)
-    ops0 @?= [WODone ()]
+    ops0 @?= [WOView "", WODone ()]
     ops1 <- runWidget $ liftUnsafeBlockingIO (threadDelay 10)
     ops1 @?= [WODone ()]
 
@@ -235,7 +229,7 @@ testException =
                 catch @_ @TestException
                     (liftSafeBlockingIO (throwIO TestException) $> (1 :: Int))
                     (\_ -> pure 2)
-        ops @?= [WODone 2]
+        ops @?= [WOView "", WODone 2]
 
     testCatchEffect' = testCase "catch from effect'" $ do
         ops <-
@@ -243,4 +237,4 @@ testException =
                 let w0 = waitFor1 *> liftSafeBlockingIO (throwIO TestException) $> (1 :: Int)
                 let w1 = waitFor2 *> liftSafeBlockingIO (throwIO TestException2) $> (2 :: Int)
                 catch @_ @TestException (w0 <|> w1) (\_ -> pure 3)
-        ops @?= [WOView "", WODone 3]
+        ops @?= [WOView "", WOView "", WODone 3]
