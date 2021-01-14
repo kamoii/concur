@@ -481,6 +481,8 @@ instance MonadUnsafeBlockingIO m => MonadUnsafeBlockingIO (ReaderT r m) where
 --     liftUnsafeBlockingIO = lift . liftUnsafeBlockingIO
 
 -- | MonadSafeBlockingIO
+-- TODO: Really need??? maybe MonadIO is enough.
+-- The name is really confusing with MonadUnsafeBlockingIO
 class Monad m => MonadSafeBlockingIO m where
     liftSafeBlockingIO :: IO a -> m a
 
@@ -495,20 +497,15 @@ instance MonadSafeBlockingIO m => MonadSafeBlockingIO (ReaderT r m) where
 
 -- | MonadView
 
--- TODO: Maybe `view' shouldn't be exposed to user. Only `display'
--- `view' might encorouage imprative style coding.
 class Monad m => MonadView v m | m -> v where
-    -- view :: v -> m ()
     display :: v -> m a
     mapView :: (v -> v) -> m a -> m a
 
 instance MonadView v (Widget v) where
-    -- view = _view
     display = _display
     mapView = _mapView
 
 instance MonadView v m => MonadView v (ReaderT r m) where
-    -- view = lift . view
     display = lift . display
     mapView f = mapReaderT (mapView f)
 
