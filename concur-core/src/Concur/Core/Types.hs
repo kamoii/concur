@@ -452,9 +452,6 @@ instance MonadUnsafeBlockingIO (Widget v) where
 instance MonadUnsafeBlockingIO m => MonadUnsafeBlockingIO (ReaderT r m) where
     liftUnsafeBlockingIO = lift . liftUnsafeBlockingIO
 
--- instance MonadUnsafeBlockingIO m => MonadUnsafeBlockingIO (ExceptT e m) where
---     liftUnsafeBlockingIO = lift . liftUnsafeBlockingIO
-
 -- | MonadSafeBlockingIO
 -- TODO: Really need??? maybe MonadIO is enough.
 -- The name is really confusing with MonadUnsafeBlockingIO
@@ -466,9 +463,6 @@ instance Monoid v => MonadSafeBlockingIO (Widget v) where
 
 instance MonadSafeBlockingIO m => MonadSafeBlockingIO (ReaderT r m) where
     liftSafeBlockingIO = lift . liftSafeBlockingIO
-
--- instance MonadSafeBlockingIO m => MonadSafeBlockingIO (ExceptT e m) where
---     liftSafeBlockingIO = lift . liftSafeBlockingIO
 
 -- | MonadView
 
@@ -483,8 +477,3 @@ instance MonadView v (Widget v) where
 instance MonadView v m => MonadView v (ReaderT r m) where
     display = lift . display
     mapView f = mapReaderT (mapView f)
-
--- instance MonadView v m => MonadView v (ExceptT e m) where
---     view = lift . view
---     display = lift . display
---     mapView f = mapExceptT (mapView f)
