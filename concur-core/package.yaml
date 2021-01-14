@@ -28,6 +28,7 @@ library:
   - Concur.Core
   - Concur.Core.Types
   - Concur.Core.Notify
+  - Concur.Core.Control
   - Control.ShiftMap
   - Control.MultiAlternative
 tests:

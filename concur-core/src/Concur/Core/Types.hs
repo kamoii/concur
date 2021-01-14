@@ -21,7 +21,6 @@ module Concur.Core.Types (
     MultiAlternative (..),
     andd,
     andd',
-    remoteWidget,
     MonadUnsafeBlockingIO (..),
     MonadSafeBlockingIO (..),
     MonadView (..),
@@ -205,22 +204,6 @@ _catch (Widget w) handler = step w
     step (Free (StepBlock v c a)) = effect' v c (Safe.try @_ @e a) >>= either handler step
     step (Free (StepBlockForever v)) = forever' v
     step (Pure a) = pure a
-
--- Make a Widget, which can be pushed to remotely
-remoteWidget ::
-    ( MultiAlternative m
-    , MonadUnsafeBlockingIO m
-    , MonadSafeBlockingIO m
-    ) =>
-    m b ->
-    (a -> m b) ->
-    IO (a -> m (), m b)
-remoteWidget d f = do
-    var <- newEmptyMVar
-    return (proxy var, wid var d)
-  where
-    proxy var = liftUnsafeBlockingIO . putMVar var
-    wid var ui = orr [Left <$> ui, Right <$> liftSafeBlockingIO (takeMVar var)] >>= either return (wid var . f)
 
 instance Monoid v => MonadIO (Widget v) where
     liftIO = effect

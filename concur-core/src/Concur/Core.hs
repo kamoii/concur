@@ -4,3 +4,4 @@ module Concur.Core
 
 import Concur.Core.Types as X
 import Concur.Core.Notify as X
+import Concur.Core.Control as X

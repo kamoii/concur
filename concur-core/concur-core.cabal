@@ -4,7 +4,7 @@ cabal-version: 1.12
 --
 -- see: https://github.com/sol/hpack
 --
--- hash: 444d64a1a16b5332fe1885bffa69b4e0dc6a96189e8dfaa1e78f126af4a1c18e
+-- hash: b158b7727c66103dd4893e4d0d878216f8ea9928024605f61f458ccecf27f85d
 
 name:           concur-core
 version:        0.1.0.0
@@ -31,6 +31,7 @@ library
       Concur.Core
       Concur.Core.Types
       Concur.Core.Notify
+      Concur.Core.Control
       Control.ShiftMap
       Control.MultiAlternative
   other-modules:
