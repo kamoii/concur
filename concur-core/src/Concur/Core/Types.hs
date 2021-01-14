@@ -22,7 +22,6 @@ module Concur.Core.Types (
     andd,
     andd',
     remoteWidget,
-    unsafeBlockingIO,
     MonadUnsafeBlockingIO (..),
     MonadSafeBlockingIO (..),
     MonadView (..),
@@ -207,18 +206,11 @@ _catch (Widget w) handler = step w
     step (Free (StepBlockForever v)) = forever' v
     step (Pure a) = pure a
 
-{- | IMPORTANT: Blocking IO is dangerous as it can block the entire UI from updating.
-   It should only be used for *very* quick running IO actions like creating MVars.
--}
-unsafeBlockingIO :: IO a -> Widget v a
-unsafeBlockingIO = io
-
 -- Make a Widget, which can be pushed to remotely
 remoteWidget ::
     ( MultiAlternative m
     , MonadUnsafeBlockingIO m
     , MonadSafeBlockingIO m
-    , Monad m
     ) =>
     m b ->
     (a -> m b) ->
